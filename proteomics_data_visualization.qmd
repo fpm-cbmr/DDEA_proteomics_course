@@ -1,0 +1,710 @@
+---
+title: "Proteomics Data Visualization"
+subtitle: "DDEA Proteomics Course — Hands-On Tutorial"
+author: ""
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    number-sections: true
+    theme: cosmo
+    code-fold: false
+    code-tools: true
+    code-link: true
+    df-print: paged
+    fig-width: 7
+    fig-height: 5
+execute:
+  warning: false
+  message: false
+  echo: true
+editor: source
+---
+
+```{r setup}
+#| include: false
+
+library(tidyverse)
+# Dimensionality reduction & embedding
+# library(Seurat)         # UMAP + FeaturePlot workflow
+# Pathway enrichment
+library(clusterProfiler)
+library(org.Hs.eg.db)
+# Differential analysis & visualization
+library(limma)
+# library(EnhancedVolcano)
+library(pheatmap)
+# Trajectory / neighbourhood testing
+# library(miloR)
+```
+
+------------------------------------------------------------------------
+
+## Learning Objectives
+
+By the end of this session you will be able to:
+
+1.  Describe the structure of a single-fiber proteomics dataset and access its intensity matrix and sample metadata.
+2.  Run and interpret linear (PCA) and non-linear (UMAP) dimensionality-reduction methods on protein-intensity data.
+3.  Extract latent vectors from a low-dimensional embedding and relate them to biological covariates.
+4.  Use neighbourhood-based testing (MILO) to detect differential abundance across phenotypic groups in single-fiber space.
+5.  Visualize the results of a differential abundance analysis using boxplots, volcano plots, UMAP feature plots, and covariate–intensity associations.
+6.  Build heatmaps of differentially abundant proteins, cluster them into co-regulated modules, and link those modules to biological pathways.
+
+------------------------------------------------------------------------
+
+# Dataset: Single-Fiber Human Muscle Proteomics
+
+::: callout-note
+This section is a placeholder — update with the actual cohort description, acquisition method, and any preprocessing already applied before the session.
+:::
+
+The example dataset contains protein intensities for **thousands of single muscle fibers** dissected from human donors. The data is distributed as an `.rds` file containing a **named list** with (at least) two objects:
+
+| Object | Type | Rows | Columns | Notes |
+|---------------|---------------|---------------|---------------|---------------|
+| `intensities` | `matrix` / `data.frame` | proteins | single fibers | log2-transformed, normalized intensities |
+| `metadata` | `data.frame` | single fibers | sample-level annotations | donor ID, fiber type, condition, etc. |
+
+> **TODO**: replace with the exact object names, dimensions, normalization scheme, and donor / condition design once finalized.
+
+```{r load-data}
+#| eval: false
+
+# Load the prepared dataset
+fiber_data <- readRDS("data/single_fiber_proteomics.rds")
+
+# Inspect structure
+str(fiber_data, max.level = 1)
+
+# Convenience handles
+intensities <- fiber_data$intensities   # proteins x fibers
+metadata    <- fiber_data$metadata      # one row per fiber
+
+dim(intensities)
+head(metadata)
+```
+
+> **Exercise 1.1**: Inspect `metadata`. Which variables are biological (donor, fiber type, …) and which are technical (plate, run order, …)? Why does this distinction matter for the analyses that follow?
+
+<details>
+
+<summary><strong>Exercise 1.1 — possible answer</strong></summary>
+
+TODO — fill in once the metadata fields are finalized. The point to make: biological covariates are what we *want* the embedding to reflect; technical covariates are confounders we want to rule out as drivers of the structure we see.
+
+</details>
+
+------------------------------------------------------------------------
+
+# Stage 1: Dimensionality Reduction & Clustering
+
+## Why reduce dimensionality?
+
+A single-fiber proteomics matrix has thousands of proteins measured across thousands of fibers — too many dimensions to visualize directly, and most pairs of proteins are correlated. Dimensionality reduction projects the data into a small number of axes that capture the strongest sources of variation, letting us see global structure (fiber types, donors, conditions) in two or three dimensions.
+
+| Method | Type | What it preserves | Use it for |
+|-----------------|-----------------|---------------------|------------------|
+| PCA | Linear | Global variance; directions of maximum spread | Detecting dominant gradients / batches |
+| UMAP | Non-linear | Local neighbourhood structure | Revealing discrete populations / clusters |
+
+## 1.1 Principal Component Analysis (PCA)
+
+PCA finds orthogonal linear combinations of proteins that maximize variance. PC1 captures the strongest gradient in the data, PC2 the next strongest orthogonal to PC1, and so on. Each fiber gets a score on each PC; each protein gets a loading.
+
+```{r pca}
+#| eval: false
+
+# prcomp expects observations in rows and features in columns,
+# so we transpose: rows = fibers, columns = proteins.
+# It does NOT tolerate NA, so we mean-impute first (row-wise on the original matrix).
+imp <- intensities |> 
+    PhosR::tImpute() |> 
+    as.data.frame()
+
+pca_res <- prcomp(t(imp), scale. = TRUE)
+
+# --- Scree plot: variance explained per PC ---
+var_exp <- (pca_res$sdev^2) / sum(pca_res$sdev^2)
+
+tibble(PC = seq_along(var_exp), var_exp = var_exp) %>%
+  slice_head(n = 20) %>%
+  ggplot(aes(PC, var_exp)) +
+  geom_col() +
+  scale_x_continuous(breaks = 1:20) +
+  scale_y_continuous(labels = scales::percent) +
+  theme_minimal() +
+  labs(y = "Variance explained")
+
+# --- Attach PC1 / PC2 back to metadata so downstream chunks can use them ---
+metadata <- metadata %>%
+  left_join(
+    as_tibble(pca_res$x, rownames = "fiber_id") %>% select(fiber_id, PC1, PC2),
+    by = "fiber_id"
+  )
+
+# --- PCA scatter: PC1 vs PC2, coloured by time, shaped by subject ---
+ggplot(metadata, aes(PC1, PC2, colour = time)) +
+  geom_point(size = 0.8, alpha = 0.7) +
+  theme_minimal()
+```
+
+> **Exercise 1.2**: Look at the scree plot. How many PCs together explain the major part of the variance?
+
+<details>
+
+<summary><strong>Exercise 1.2 — possible answer</strong></summary>
+
+PC1 alone explains a great % of variance, almost three times more than PC2. This data set has an important amount of information captured by PC1.
+
+</details>
+
+> **Exercise 1.3**: Time doesn't seem to be explained by either PC1 or PC2.
+>
+> 1.  What about subject? Can either PC1 or PC2 explain subject variability? Color the PCA by subject and find out!
+>
+> 2.  Then, try extracting PC3 and plotting it against PC1. Does it capture the effect of time better? Look at the previous code chunk for inspiration!
+
+<details>
+
+<summary><strong>Exercise 1.3.1 — solution</strong></summary>
+
+```{r ex-1-3-1}
+#| eval: false
+
+ggplot(metadata, aes(PC1, PC2, colour = subject_id)) +
+  geom_point(size = 0.8, alpha = 0.7) +
+  theme_minimal()
+```
+
+</details>
+
+<details>
+
+<summary><strong>Exercise 1.3.2 — solution</strong></summary>
+
+```{r ex-1-3-2}
+#| eval: false
+
+metadata_exercise <- metadata %>%
+  left_join(
+    as_tibble(pca_res$x, rownames = "fiber_id") %>% select(fiber_id, PC3),
+    by = "fiber_id"
+  )
+
+# --- PCA scatter: PC1 vs PC3, coloured by time ---
+ggplot(metadata_exercise, aes(PC1, PC3, colour = time)) +
+  geom_point(size = 0.8, alpha = 0.7) +
+  theme_minimal()
+```
+
+</details>
+
+## 1.2 Extracting vectors of information from PCA
+
+The fiber-level PC scores live in `pca_res$x` (one row per fiber, one column per PC). Protein loadings live in `pca_res$rotation`. These two matrices are what you carry forward:
+
+-   We already joined the PC score/sample for PC1 and PC2 back to `metadata` for downstream modelling.
+-   These can be tested for associations with protein intensities using linear models, GAMs, etc.(`lm( ~ intensity + PCx)`).
+-   By extracting the loadings for each PC, we can see which proteins are the greatest drivers of that PC.
+
+```{r pca-vectors}
+#| eval: false
+
+pc_scores <- as_tibble(pca_res$x, rownames = "fiber_id") %>%
+  left_join(metadata |> 
+                dplyr::select(!c(PC1, PC2, PC3)), by = "fiber_id")
+
+# Quick association screen: which covariates drive which PCs?
+# Example: PC1 vs. time
+summary(lm(PC1 ~ time, data = pc_scores))
+summary(lm(PC3 ~ time, data = pc_scores))
+
+# PC1 is associated with time, however, PC3 shows a greater association
+```
+
+
+PCA loadings can be extracted from `pca_res$rotation` and used, for example, as an input for a ranked GSEA test. The ranking statistic here is the **loading of each protein on PC1** — a signed weight, where strongly positive and strongly negative loadings both indicate proteins that drive the axis (just in opposite directions). `clusterProfiler::gseGO` walks down the ranked list and tests whether each GO Biological Process term is enriched at one extreme.
+
+```{r pca-loadings}
+#| eval: false
+
+# --- 1. Extract PC1 loadings as a named, ranked vector ---
+PC1_loadings <- sort(pca_res$rotation[, "PC1"], decreasing = TRUE)
+head(PC1_loadings, 10)   # most positive
+tail(PC1_loadings, 10)   # most negative
+
+# --- 2. Ranked GSEA against GO Biological Process ---
+# Gene symbols are the keys, so we set keyType = "SYMBOL".
+# On Windows, the default BiocParallel backend (SnowParam) sometimes fails
+# to serialize the permutation step. Force serial execution to avoid this.
+BiocParallel::register(BiocParallel::SerialParam())
+
+set.seed(42)
+gse_PC1 <- clusterProfiler::gseGO(
+  geneList     = PC1_loadings,
+  OrgDb        = org.Hs.eg.db::org.Hs.eg.db,
+  keyType      = "SYMBOL",
+  ont          = "BP",
+  minGSSize    = 15,
+  maxGSSize    = 500,
+  pvalueCutoff = 0.05,
+  verbose      = FALSE
+)
+
+# --- 3. Tidy results and pick top terms (10 up, 10 down by padj) ---
+gse_PC1_df <- as_tibble(gse_PC1@result) %>% arrange(p.adjust)
+
+top_terms <- bind_rows(
+  gse_PC1_df %>% filter(NES > 0) %>% slice_head(n = 10),
+  gse_PC1_df %>% filter(NES < 0) %>% slice_head(n = 10)
+)
+
+# --- 4. Dot plot ---
+top_terms %>%
+  ggplot(aes(x = NES,
+             y = forcats::fct_reorder(Description, NES),
+             size   = -log10(p.adjust),
+             colour = NES)) +
+  geom_point() +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = "grey60") +
+  scale_colour_gradient2(low = "steelblue", mid = "grey80", high = "firebrick",
+                         midpoint = 0) +
+  theme_minimal() +
+  labs(title = "GO:BP terms ranked by PC1 loading",
+       x = "Normalized enrichment score (NES)",
+       y = NULL,
+       size = "-log10(p.adjust)")
+```
+
+> **Exercise 1.4**: PC1 captures the dominant axis of variation in the data, but the other PCs may carry biology too. Repeat the ranked GSEA for **PC2** and **PC3** and inspect their dot plots. What is the dominant biology associated with each? Do any pathways appear on multiple PCs (and what would that mean)?
+
+<details>
+
+<summary><strong>Exercise 1.4 — solution</strong></summary>
+
+The workflow is identical to PC1 — only the column we pull from `pca_res$rotation` changes. Wrapping it in a small helper keeps the code clean and produces one dot plot per PC:
+
+```{r ex-1-4}
+#| eval: false
+
+plot_pc_gsea_go <- function(pc, seed = 42) {
+
+  loadings <- sort(pca_res$rotation[, pc], decreasing = TRUE)
+
+  BiocParallel::register(BiocParallel::SerialParam())
+  set.seed(seed)
+  gse <- clusterProfiler::gseGO(
+    geneList     = loadings,
+    OrgDb        = org.Hs.eg.db::org.Hs.eg.db,
+    keyType      = "SYMBOL",
+    ont          = "BP",
+    minGSSize    = 15,
+    maxGSSize    = 500,
+    pvalueCutoff = 0.05,
+    verbose      = FALSE
+  )
+
+  top <- as_tibble(gse@result) %>%
+    arrange(p.adjust) %>%
+    {dplyr::bind_rows(
+       dplyr::filter(., NES > 0) %>% slice_head(n = 10),
+       dplyr::filter(., NES < 0) %>% slice_head(n = 10)
+    )}
+
+  ggplot(top, aes(x = NES,
+                  y = forcats::fct_reorder(Description, NES),
+                  size   = -log10(p.adjust),
+                  colour = NES)) +
+    geom_point() +
+    geom_vline(xintercept = 0, linetype = "dashed", colour = "grey60") +
+    scale_colour_gradient2(low = "steelblue", mid = "grey80",
+                           high = "firebrick", midpoint = 0) +
+    theme_minimal() +
+    labs(title = paste("GO:BP terms ranked by", pc, "loading"),
+         x = "Normalized enrichment score (NES)",
+         y = NULL,
+         size = "-log10(p.adjust)")
+}
+
+plot_pc_gsea_go("PC2")
+plot_pc_gsea_go("PC3")
+```
+
+</details>
+
+## 1.3 Uniform Manifold Approximation and Projection (UMAP)
+
+UMAP is a non-linear embedding that prioritizes preserving **local** neighbourhood structure. It is well-suited for revealing discrete populations (e.g. fast vs. slow fibers, hybrid fibers) that may not separate along a single linear axis.
+
+We use the **Seurat workflow**, which packages PCA → neighbour graph → UMAP into a single object and provides `DimPlot` / `FeaturePlot` helpers we will reuse later.
+
+```{r umap}
+#| eval: false
+
+# Seurat does not tolerate NA — feed it the mean-imputed matrix from the PCA step.
+# Rownames of the metadata data.frame must match the column names of the matrix.
+md <- metadata %>% column_to_rownames("fiber_id")
+
+seu <- Seurat::CreateSeuratObject(counts = imp, meta.data = md)
+
+# Intensities are already log-transformed and normalized, so we skip
+# NormalizeData. Treat every protein as a "variable feature".
+Seurat::VariableFeatures(seu) <- rownames(seu)
+
+seu <- Seurat::ScaleData(seu, features = rownames(seu), verbose = FALSE)
+seu <- Seurat::RunPCA(seu, features = rownames(seu), npcs = 30, verbose = FALSE)
+seu <- Seurat::RunUMAP(seu, dims = 1:20, verbose = FALSE)
+
+Seurat::DimPlot(seu, reduction = "umap", group.by = "time", pt.size = 0.4) +
+  ggplot2::ggtitle("UMAP of single fibers")
+```
+
+The embedding itself is stored in `Embeddings(seu, "umap")` if you need a `data.frame` for custom plots:
+
+```{r umap-embeddings}
+#| eval: false
+
+umap_df <- Seurat::Embeddings(seu, "umap") %>%
+  as_tibble(rownames = "fiber_id") %>%
+  rename(UMAP1 = umap_1, UMAP2 = umap_2) %>%
+  left_join(metadata, by = "fiber_id")
+```
+
+> **Exercise 1.3**: Re-run UMAP with `n_neighbors = 5` and `n_neighbors = 100`. How does the embedding change? What does this tell you about the scale at which UMAP looks for structure?
+
+<details>
+
+<summary><strong>Exercise 1.3 — possible answer</strong></summary>
+
+TODO — small `n_neighbors` emphasizes local structure (more, smaller clusters); large `n_neighbors` emphasizes global structure (fewer, broader clusters).
+
+</details>
+
+## 1.4 Differential abundance in embedding space — MILO
+
+MILO tests for differential abundance across neighbourhoods of a kNN graph built on the embedding, instead of treating every fiber as independent. It avoids hard clustering and gives a continuous map of where two groups differ in fiber-state space.
+
+```{r milo}
+#| eval: false
+
+# Build a SingleCellExperiment / Milo object from the intensity matrix
+milo_obj <- miloR::Milo(SingleCellExperiment::SingleCellExperiment(
+  assays = list(logcounts = intensities)
+))
+
+milo_obj <- miloR::buildGraph(milo_obj, k = 30, d = 20)
+milo_obj <- miloR::makeNhoods(milo_obj, prop = 0.1, k = 30, d = 20, refined = TRUE)
+milo_obj <- miloR::countCells(milo_obj, meta.data = metadata, sample = "subject_id")
+
+design <- metadata %>% distinct(subject_id, time)
+da_res  <- miloR::testNhoods(milo_obj, design = ~ time, design.df = design)
+
+miloR::plotNhoodGraphDA(milo_obj, da_res, layout = "UMAP", alpha = 0.1)
+```
+
+> **Exercise 1.4**: Which neighbourhoods are enriched in `post` vs `pre`? Do they correspond to a specific fiber type, subject, or a more diffuse region of the embedding?
+
+<details>
+
+<summary><strong>Exercise 1.4 — possible answer</strong></summary>
+
+TODO.
+
+</details>
+
+------------------------------------------------------------------------
+
+# Stage 2: Visualizing Differential Abundance Results
+
+The model fitted upstream (a per-protein GAM with `s(PC1, by = time)` and a subject random effect) returns, for every gene, three p-values that summarize different biological questions:
+
+| Column | Question it answers |
+|-------------------|-----------------------------------------------------|
+| `Estimate_time1` | Effect size (log2FC) of `post` vs. `pre`, averaged over PC1 |
+| `Pr(>|t|)_time1` | Is the protein differentially abundant between `pre` and `post`? |
+| `p_val_fiber_type` | Is the protein's intensity associated with PC1 (i.e. fiber type)? |
+| `p_val_interaction` | Does the time effect depend on PC1 (i.e. fiber-type-specific response)? |
+
+Results are stored as a **named list** — one entry per gene, each entry containing a one-row tibble `model_results`. We start by flattening it into a tidy data frame for plotting.
+
+```{r da-input}
+#| eval: false
+
+model_list <- readRDS("results/model_results.rds")
+
+# Flatten the named list into one row per protein
+da_results <- dplyr::bind_rows(lapply(model_list, `[[`, "model_results")) %>%
+  dplyr::mutate(
+    adj_p_time        = p.adjust(`Pr(>|t|)_time1`,  method = "BH"),
+    adj_p_fiber_type  = p.adjust(p_val_fiber_type,  method = "BH"),
+    adj_p_interaction = p.adjust(p_val_interaction, method = "BH")
+  )
+
+head(da_results)
+```
+
+## 2.1 Boxplots of single features
+
+The first sanity check after any DA result is to look at the raw intensities of a few top hits, stratified by the variable of interest.
+
+```{r boxplot-feature}
+#| eval: false
+
+# Pick a top hit on the time effect
+feature <- da_results %>% arrange(`Pr(>|t|)_time1`) %>% slice(1) %>% pull(gene)
+
+plot_df <- tibble(
+  fiber_id  = colnames(intensities),
+  intensity = intensities[feature, ]
+) %>%
+  left_join(metadata, by = "fiber_id")
+
+ggplot(plot_df, aes(time, intensity, fill = time)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.6) +
+  geom_jitter(width = 0.2, size = 0.3, alpha = 0.3) +
+  theme_minimal() +
+  labs(title = feature, y = "log2 intensity")
+```
+
+> **Exercise 2.1**: Pick three proteins from the top of `da_results` (sorted by `Pr(>|t|)_time1`) and three from the bottom. Does the boxplot pattern match the test statistic?
+
+<details>
+
+<summary><strong>Exercise 2.1 — possible answer</strong></summary>
+
+TODO.
+
+</details>
+
+## 2.2 Volcano plots
+
+A volcano plot shows effect size (`Estimate_time1`, the log2FC of `post − pre`) on the x-axis against statistical significance (`-log10 p-value`) on the y-axis. It is the standard one-glance summary of a DA analysis.
+
+```{r volcano}
+#| eval: false
+
+EnhancedVolcano::EnhancedVolcano(
+  da_results,
+  lab        = da_results$gene,
+  x          = "Estimate_time1",
+  y          = "adj_p_time",
+  pCutoff    = 0.05,
+  FCcutoff   = 0.5,
+  title      = "Differential abundance",
+  subtitle   = "post vs. pre"
+)
+```
+
+> **Exercise 2.2**: How many proteins are significant at `adj_p_time < 0.05`? Are the hits symmetric around `Estimate_time1 = 0`, or biased toward one direction? What would asymmetry suggest biologically?
+
+<details>
+
+<summary><strong>Exercise 2.2 — possible answer</strong></summary>
+
+TODO.
+
+</details>
+
+## 2.3 Feature plots on UMAP
+
+Overlaying a single protein's intensity onto the UMAP embedding shows *where* in fiber-state space that protein is high or low — often more informative than a boxplot when the contrast is driven by a sub-population.
+
+```{r umap-feature}
+#| eval: false
+
+feature <- da_results %>% arrange(p_val_fiber_type) %>% slice(1) %>% pull(gene)
+
+Seurat::FeaturePlot(seu, features = feature, reduction = "umap",
+                    pt.size = 0.4, order = TRUE) +
+  ggplot2::scale_colour_viridis_c()
+```
+
+## 2.4 Association of protein intensity with PC1 (fiber type)
+
+`p_val_fiber_type` tests whether a protein's intensity varies along PC1. For a top fiber-type hit, the relationship should be obvious in a scatter of intensity vs. PC1.
+
+```{r intensity-vs-pc1}
+#| eval: false
+
+feature <- da_results %>% arrange(p_val_fiber_type) %>% slice(1) %>% pull(gene)
+
+plot_df <- tibble(
+  fiber_id  = colnames(intensities),
+  intensity = intensities[feature, ]
+) %>%
+  left_join(metadata, by = "fiber_id")
+
+ggplot(plot_df, aes(PC1, intensity)) +
+  geom_point(size = 0.4, alpha = 0.4) +
+  geom_smooth(method = "gam", formula = y ~ s(x), se = TRUE) +
+  theme_minimal() +
+  labs(title = feature, x = "PC1 (fiber-type axis)", y = "log2 intensity")
+```
+
+> **Exercise 2.3**: Pick a protein with very small `p_val_fiber_type` and one with very large `p_val_fiber_type`. Compare their scatter plots against PC1. Does the test result match what you see?
+
+<details>
+
+<summary><strong>Exercise 2.3 — possible answer</strong></summary>
+
+For a top fiber-type hit, the points form a clear monotonic trend along PC1 (\|Pearson r\| typically \> 0.8 on this dataset). For a non-significant protein the cloud is essentially flat. The GAM smoother lets you see whether the relationship is linear or curved.
+
+</details>
+
+## 2.5 Interaction between PC1 and time
+
+`p_val_interaction` flags proteins whose PC1 dependence **differs between pre and post** — i.e. the time effect is fiber-type-specific. The cleanest visualization is intensity vs. PC1, split by time:
+
+```{r interaction-plot}
+#| eval: false
+
+feature <- da_results %>% arrange(p_val_interaction) %>% slice(1) %>% pull(gene)
+
+plot_df <- tibble(
+  fiber_id  = colnames(intensities),
+  intensity = intensities[feature, ]
+) %>%
+  left_join(metadata, by = "fiber_id")
+
+ggplot(plot_df, aes(PC1, intensity, colour = time, fill = time)) +
+  geom_point(size = 0.4, alpha = 0.3) +
+  geom_smooth(method = "gam", formula = y ~ s(x), se = TRUE, alpha = 0.2) +
+  theme_minimal() +
+  labs(title = feature, x = "PC1 (fiber-type axis)", y = "log2 intensity",
+       subtitle = "Two curves with different slopes => significant interaction")
+```
+
+> **Exercise 2.4**: For a top interaction hit, do the two smoothers (pre, post) cross or diverge? What does that pattern imply biologically — that the response to the perturbation is stronger in one fiber type than the other?
+
+<details>
+
+<summary><strong>Exercise 2.4 — possible answer</strong></summary>
+
+A significant `p_val_interaction` means the slope of intensity vs. PC1 is different in pre vs. post fibers. If the two curves diverge as \|PC1\| grows, the time effect is amplified in the more extreme fibers (e.g. only fast fibers respond). If they cross, the direction of the time effect flips between fiber types.
+
+</details>
+
+------------------------------------------------------------------------
+
+# Stage 3: Heatmaps, Co-Regulated Modules & Pathway Enrichment
+
+A volcano plot tells you *which* proteins change, but not whether they change *together*. A clustered heatmap of differentially abundant proteins reveals **modules** — groups of proteins that follow the same expression pattern across fibers — which often correspond to a shared biological process.
+
+## 3.1 Heatmap of differentially abundant proteins
+
+```{r heatmap}
+#| eval: false
+
+sig_proteins <- da_results %>%
+  filter(adj_p_time < 0.05) %>%
+  pull(gene)
+
+mat <- intensities[sig_proteins, ]
+mat <- t(scale(t(mat)))   # z-score per protein (row-wise)
+
+# Mean-impute remaining NAs for clustering
+row_means <- rowMeans(mat, na.rm = TRUE)
+na_idx <- which(is.na(mat), arr.ind = TRUE)
+mat[na_idx] <- row_means[na_idx[, "row"]]
+
+# Order columns by PC1 so the fiber-type axis reads left-to-right
+col_order <- order(metadata$PC1)
+mat <- mat[, col_order]
+
+# pheatmap reads annotations from a data frame whose rownames match colnames(mat)
+ann_col <- metadata %>%
+  select(fiber_id, time, PC1) %>%
+  column_to_rownames("fiber_id")
+ann_col <- ann_col[colnames(mat), , drop = FALSE]
+
+ph <- pheatmap::pheatmap(
+  mat,
+  annotation_col   = ann_col,
+  show_rownames    = FALSE,
+  show_colnames    = FALSE,
+  cluster_rows     = TRUE,
+  cluster_cols     = FALSE,   # columns already ordered by PC1
+  cutree_rows      = 6,       # <- number of protein modules, tune
+  scale            = "none",  # already z-scored above
+  fontsize         = 8
+)
+```
+
+> **Exercise 3.1**: Increase `row_km` from 4 to 10. At what value do additional modules become redundant (i.e. two splits that show essentially the same pattern)? This is a practical heuristic for the number of meaningful modules.
+
+<details>
+
+<summary><strong>Exercise 3.1 — possible answer</strong></summary>
+
+TODO.
+
+</details>
+
+## 3.2 Extracting module membership
+
+```{r modules}
+#| eval: false
+
+# pheatmap returns the row hclust as `tree_row`; cut it at the same k used above
+module_id <- cutree(ph$tree_row, k = 6)
+modules   <- tibble(protein = names(module_id), module = unname(module_id))
+
+modules %>% count(module)
+```
+
+## 3.3 Pathway enrichment per module
+
+For each module, test whether its protein set is enriched for any annotated pathway (Reactome, KEGG, GO BP). Tools: `clusterProfiler`, `fgsea`, `enrichR`.
+
+```{r enrichment}
+#| eval: false
+
+# Per-module over-representation analysis
+# enrich_res <- modules %>%
+#   group_split(module) %>%
+#   map(~ clusterProfiler::enrichGO(
+#         gene         = .x$protein,
+#         universe     = rownames(intensities),
+#         keyType      = "SYMBOL",
+#         OrgDb        = org.Hs.eg.db::org.Hs.eg.db,
+#         ont          = "BP",
+#         pAdjustMethod = "BH"
+#       ))
+```
+
+> **Exercise 3.2**: For the module most strongly associated with the time effect, what is the top enriched pathway? Does it match the known biology of the perturbation?
+
+<details>
+
+<summary><strong>Exercise 3.2 — possible answer</strong></summary>
+
+TODO.
+
+</details>
+
+------------------------------------------------------------------------
+
+# Extended Exercises
+
+### Exercise A — PCA input choice
+
+Re-run the PCA after (i) keeping all proteins, (ii) keeping only the top-2000 most variable proteins, and (iii) keeping only the differentially abundant proteins. How does the variance explained by PC1 change? Which input gives the cleanest separation of `time`?
+
+### Exercise B — UMAP stability
+
+UMAP is stochastic. Run UMAP three times with different `set.seed()` values and overlay the results. Are the global structures (clusters) consistent? Are the local positions of individual fibers consistent?
+
+### Exercise C — Volcano cutoffs
+
+Re-plot the volcano with `FCcutoff = 0.5`, `1`, and `2`. How does the count of "significant" proteins change? When is the FC cutoff justified by the biology vs. arbitrary?
+
+### Exercise D — Module robustness
+
+Bootstrap the heatmap: sample 80 % of the fibers without replacement, redo the clustering, and check whether the same modules emerge. This gives an empirical measure of module stability.
+
+### Exercise E — From modules to mechanism
+
+Pick one enriched pathway from Exercise 3.2 and find a curated regulator of that pathway (transcription factor, kinase). Is the regulator itself differentially abundant? If not, does it lie in any of the modules?

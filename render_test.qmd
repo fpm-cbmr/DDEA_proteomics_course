@@ -1,0 +1,202 @@
+---
+title: "Proteomics Data Visualization"
+subtitle: "DDEA Proteomics Course — Hands-On Tutorial"
+author: ""
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    number-sections: true
+    theme: cosmo
+    code-fold: false
+    code-tools: true
+    code-link: true
+    df-print: paged
+    fig-width: 7
+    fig-height: 5
+execute:
+  warning: false
+  message: false
+  echo: true
+editor: source
+---
+
+```{r setup}
+#| include: false
+
+library(tidyverse)
+# Dimensionality reduction & embedding
+# library(Seurat)         # UMAP + FeaturePlot workflow
+# Differential analysis & visualization
+# library(limma)
+# library(EnhancedVolcano)
+# library(pheatmap)
+# Trajectory / neighbourhood testing
+# library(miloR)
+```
+
+------------------------------------------------------------------------
+
+## Learning Objectives
+
+By the end of this session you will be able to:
+
+1.  Describe the structure of a single-fiber proteomics dataset and access its intensity matrix and sample metadata.
+2.  Run and interpret linear (PCA) and non-linear (UMAP) dimensionality-reduction methods on protein-intensity data.
+3.  Extract latent vectors from a low-dimensional embedding and relate them to biological covariates.
+4.  Use neighbourhood-based testing (MILO) to detect differential abundance across phenotypic groups in single-fiber space.
+5.  Visualize the results of a differential abundance analysis using boxplots, volcano plots, UMAP feature plots, and covariate–intensity associations.
+6.  Build heatmaps of differentially abundant proteins, cluster them into co-regulated modules, and link those modules to biological pathways.
+
+------------------------------------------------------------------------
+
+# Dataset: Single-Fiber Human Muscle Proteomics
+
+::: callout-note
+This section is a placeholder — update with the actual cohort description, acquisition method, and any preprocessing already applied before the session.
+:::
+
+The example dataset contains protein intensities for **thousands of single muscle fibers** dissected from human donors. The data is distributed as an `.rds` file containing a **named list** with (at least) two objects:
+
+| Object | Type | Rows | Columns | Notes |
+|---------------|---------------|---------------|---------------|---------------|
+| `intensities` | `matrix` / `data.frame` | proteins | single fibers | log2-transformed, normalized intensities |
+| `metadata` | `data.frame` | single fibers | sample-level annotations | donor ID, fiber type, condition, etc. |
+
+> **TODO**: replace with the exact object names, dimensions, normalization scheme, and donor / condition design once finalized.
+
+```{r load-data}
+#| eval: false
+
+# Load the prepared dataset
+fiber_data <- readRDS("data/single_fiber_proteomics.rds")
+
+# Inspect structure
+str(fiber_data, max.level = 1)
+
+# Convenience handles
+intensities <- fiber_data$intensities   # proteins x fibers
+metadata    <- fiber_data$metadata      # one row per fiber
+
+dim(intensities)
+head(metadata)
+```
+
+> **Exercise 1.1**: Inspect `metadata`. Which variables are biological (donor, fiber type, …) and which are technical (plate, run order, …)? Why does this distinction matter for the analyses that follow?
+
+<details>
+
+<summary><strong>Exercise 1.1 — possible answer</strong></summary>
+
+TODO — fill in once the metadata fields are finalized. The point to make: biological covariates are what we *want* the embedding to reflect; technical covariates are confounders we want to rule out as drivers of the structure we see.
+
+</details>
+
+------------------------------------------------------------------------
+
+# Stage 1: Dimensionality Reduction & Clustering
+
+## Why reduce dimensionality?
+
+A single-fiber proteomics matrix has thousands of proteins measured across thousands of fibers — too many dimensions to visualize directly, and most pairs of proteins are correlated. Dimensionality reduction projects the data into a small number of axes that capture the strongest sources of variation, letting us see global structure (fiber types, donors, conditions) in two or three dimensions.
+
+| Method | Type | What it preserves | Use it for |
+|-----------------|-----------------|---------------------|------------------|
+| PCA | Linear | Global variance; directions of maximum spread | Detecting dominant gradients / batches |
+| UMAP | Non-linear | Local neighbourhood structure | Revealing discrete populations / clusters |
+
+## 1.1 Principal Component Analysis (PCA)
+
+PCA finds orthogonal linear combinations of proteins that maximize variance. PC1 captures the strongest gradient in the data, PC2 the next strongest orthogonal to PC1, and so on. Each fiber gets a score on each PC; each protein gets a loading.
+
+```{r pca}
+#| eval: false
+
+# prcomp expects observations in rows and features in columns,
+# so we transpose: rows = fibers, columns = proteins.
+# It does NOT tolerate NA, so we mean-impute first (row-wise on the original matrix).
+imp <- intensities |> 
+    PhosR::tImpute() |> 
+    as.data.frame()
+
+pca_res <- prcomp(t(imp), scale. = TRUE)
+
+# --- Scree plot: variance explained per PC ---
+var_exp <- (pca_res$sdev^2) / sum(pca_res$sdev^2)
+
+tibble(PC = seq_along(var_exp), var_exp = var_exp) %>%
+  slice_head(n = 20) %>%
+  ggplot(aes(PC, var_exp)) +
+  geom_col() +
+  scale_x_continuous(breaks = 1:20) +
+  scale_y_continuous(labels = scales::percent) +
+  theme_minimal() +
+  labs(y = "Variance explained")
+
+# --- Attach PC1 / PC2 back to metadata so downstream chunks can use them ---
+metadata <- metadata %>%
+  left_join(
+    as_tibble(pca_res$x, rownames = "fiber_id") %>% select(fiber_id, PC1, PC2),
+    by = "fiber_id"
+  )
+
+# --- PCA scatter: PC1 vs PC2, coloured by time, shaped by subject ---
+ggplot(metadata, aes(PC1, PC2, colour = time)) +
+  geom_point(size = 0.8, alpha = 0.7) +
+  theme_minimal()
+```
+
+
+> **Exercise 1.2**: Look at the scree plot. How many PCs together explain ≥ 70 % of the variance? Is PC1 dominated by biology (fiber type, donor) or by a technical variable?
+
+<details>
+
+<summary><strong>Exercise 1.2 — possible answer</strong></summary>
+
+TODO — fill in once you've run the chunk on the real dataset.
+
+</details>
+
+> **Exercise 1.3**: Time doesn't seem to be explained by either PC1 or PC2.
+>
+> 1.  What about subject? Can either PC1 or PC2 explain subject variability? Color the PCA by subject and find out!
+>
+> 2.  Then, try extracting PC3 and plotting it against PC1. Does it capture the effect of time better? Look at the previous code chunk for inspiration!
+
+<details>
+
+<summary><strong>Exercise 1.3.1 — solution</strong></summary>
+
+```{r ex-1-3-1}
+#| eval: false
+
+ggplot(metadata, aes(PC1, PC2, colour = subject_id)) +
+  geom_point(size = 0.8, alpha = 0.7) +
+  theme_minimal()
+```
+
+</details>
+
+<details>
+
+<summary><strong>Exercise 1.3.2 — solution</strong></summary>
+
+```{r ex-1-3-2}
+#| eval: false
+
+metadata_exercise <- metadata %>%
+  left_join(
+    as_tibble(pca_res$x, rownames = "fiber_id") %>% select(fiber_id, PC3),
+    by = "fiber_id"
+  )
+
+# --- PCA scatter: PC1 vs PC3, coloured by time ---
+ggplot(metadata_exercise, aes(PC1, PC3, colour = time)) +
+  geom_point(size = 0.8, alpha = 0.7) +
+  theme_minimal()
+```
+
+</details>
+
