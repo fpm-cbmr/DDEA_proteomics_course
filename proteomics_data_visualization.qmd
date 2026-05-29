@@ -26,18 +26,23 @@ editor: source
 ```{r setup}
 #| include: false
 
-library(tidyverse)
 # Dimensionality reduction & embedding
-# library(Seurat)         # UMAP + FeaturePlot workflow
+library(Seurat)             # UMAP + FeaturePlot workflow
+
 # Pathway enrichment
-library(clusterProfiler)
-library(org.Hs.eg.db)
+library(clusterProfiler)    #GSEA
+library(org.Hs.eg.db)       #Human gene annotations
+
 # Differential analysis & visualization
 library(limma)
-# library(EnhancedVolcano)
-library(pheatmap)
+library(plotly)             # interactive volcano via ggplotly
+library(pheatmap)           #Heatmap and clustering
+
 # Trajectory / neighbourhood testing
-# library(miloR)
+library(miloR)
+
+# General data wrangling:
+library(tidyverse)
 ```
 
 ------------------------------------------------------------------------
@@ -71,7 +76,7 @@ The example dataset contains protein intensities for **thousands of single muscl
 > **TODO**: replace with the exact object names, dimensions, normalization scheme, and donor / condition design once finalized.
 
 ```{r load-data}
-#| eval: false
+#| eval: true
 
 # Load the prepared dataset
 fiber_data <- readRDS("data/single_fiber_proteomics.rds")
@@ -115,7 +120,7 @@ A single-fiber proteomics matrix has thousands of proteins measured across thous
 PCA finds orthogonal linear combinations of proteins that maximize variance. PC1 captures the strongest gradient in the data, PC2 the next strongest orthogonal to PC1, and so on. Each fiber gets a score on each PC; each protein gets a loading.
 
 ```{r pca}
-#| eval: false
+#| eval: true
 
 # prcomp expects observations in rows and features in columns,
 # so we transpose: rows = fibers, columns = proteins.
@@ -172,7 +177,7 @@ PC1 alone explains a great % of variance, almost three times more than PC2. This
 <summary><strong>Exercise 1.3.1 — solution</strong></summary>
 
 ```{r ex-1-3-1}
-#| eval: false
+#| eval: true
 
 ggplot(metadata, aes(PC1, PC2, colour = subject_id)) +
   geom_point(size = 0.8, alpha = 0.7) +
@@ -186,7 +191,7 @@ ggplot(metadata, aes(PC1, PC2, colour = subject_id)) +
 <summary><strong>Exercise 1.3.2 — solution</strong></summary>
 
 ```{r ex-1-3-2}
-#| eval: false
+#| eval: true
 
 metadata_exercise <- metadata %>%
   left_join(
@@ -211,11 +216,11 @@ The fiber-level PC scores live in `pca_res$x` (one row per fiber, one column per
 -   By extracting the loadings for each PC, we can see which proteins are the greatest drivers of that PC.
 
 ```{r pca-vectors}
-#| eval: false
+#| eval: true
 
 pc_scores <- as_tibble(pca_res$x, rownames = "fiber_id") %>%
   left_join(metadata |> 
-                dplyr::select(!c(PC1, PC2, PC3)), by = "fiber_id")
+                dplyr::select(!c(PC1, PC2)), by = "fiber_id")
 
 # Quick association screen: which covariates drive which PCs?
 # Example: PC1 vs. time
@@ -229,7 +234,7 @@ summary(lm(PC3 ~ time, data = pc_scores))
 PCA loadings can be extracted from `pca_res$rotation` and used, for example, as an input for a ranked GSEA test. The ranking statistic here is the **loading of each protein on PC1** — a signed weight, where strongly positive and strongly negative loadings both indicate proteins that drive the axis (just in opposite directions). `clusterProfiler::gseGO` walks down the ranked list and tests whether each GO Biological Process term is enriched at one extreme.
 
 ```{r pca-loadings}
-#| eval: false
+#| eval: true
 
 # --- 1. Extract PC1 loadings as a named, ranked vector ---
 PC1_loadings <- sort(pca_res$rotation[, "PC1"], decreasing = TRUE)
@@ -288,7 +293,7 @@ top_terms %>%
 The workflow is identical to PC1 — only the column we pull from `pca_res$rotation` changes. Wrapping it in a small helper keeps the code clean and produces one dot plot per PC:
 
 ```{r ex-1-4}
-#| eval: false
+#| eval: true
 
 plot_pc_gsea_go <- function(pc, seed = 42) {
 
@@ -342,7 +347,7 @@ UMAP is a non-linear embedding that prioritizes preserving **local** neighbourho
 We use the **Seurat workflow**, which packages PCA → neighbour graph → UMAP into a single object and provides `DimPlot` / `FeaturePlot` helpers we will reuse later.
 
 ```{r umap}
-#| eval: false
+#| eval: true
 
 # Seurat does not tolerate NA — feed it the mean-imputed matrix from the PCA step.
 # Rownames of the metadata data.frame must match the column names of the matrix.
@@ -353,65 +358,338 @@ seu <- Seurat::CreateSeuratObject(counts = imp, meta.data = md)
 # Intensities are already log-transformed and normalized, so we skip
 # NormalizeData. Treat every protein as a "variable feature".
 Seurat::VariableFeatures(seu) <- rownames(seu)
+seu[["RNA"]]$data <- seu[["RNA"]]$counts
 
-seu <- Seurat::ScaleData(seu, features = rownames(seu), verbose = FALSE)
-seu <- Seurat::RunPCA(seu, features = rownames(seu), npcs = 30, verbose = FALSE)
+# --- Reuse the prcomp PCs from Section 1.1 as Seurat's PCA reduction ---
+# This keeps the whole course pipeline (PCA -> UMAP -> MILO) on a single set
+# of coordinates, instead of recomputing PCA per package.
+pc_emb <- pca_res$x[, 1:30]
+pc_ldg <- pca_res$rotation[, 1:30]
+colnames(pc_emb) <- paste0("PC_", seq_len(ncol(pc_emb)))
+colnames(pc_ldg) <- paste0("PC_", seq_len(ncol(pc_ldg)))
+
+seu[["pca"]] <- Seurat::CreateDimReducObject(
+  embeddings = pc_emb[colnames(seu), ],
+  loadings   = pc_ldg,
+  assay      = Seurat::DefaultAssay(seu),
+  key        = "PC_"
+)
+
+set.seed(42)
 seu <- Seurat::RunUMAP(seu, dims = 1:20, verbose = FALSE)
 
-Seurat::DimPlot(seu, reduction = "umap", group.by = "time", pt.size = 0.4) +
-  ggplot2::ggtitle("UMAP of single fibers")
+Seurat::DimPlot(seu, reduction = "umap", group.by = "time", pt.size = 0.4)
 ```
 
 The embedding itself is stored in `Embeddings(seu, "umap")` if you need a `data.frame` for custom plots:
 
 ```{r umap-embeddings}
-#| eval: false
+#| eval: true
 
 umap_df <- Seurat::Embeddings(seu, "umap") %>%
   as_tibble(rownames = "fiber_id") %>%
-  rename(UMAP1 = umap_1, UMAP2 = umap_2) %>%
+  dplyr::rename(UMAP1 = umap_1, UMAP2 = umap_2) %>%
   left_join(metadata, by = "fiber_id")
 ```
 
-> **Exercise 1.3**: Re-run UMAP with `n_neighbors = 5` and `n_neighbors = 100`. How does the embedding change? What does this tell you about the scale at which UMAP looks for structure?
+> **Exercise 1.5**: Compare the UMAP to the PC1 vs PC2 and PC1 vs PC3 scatter plots you made in Exercises 1.3.1 and 1.3.2. Does any structure become visible in the UMAP that the linear projections missed? Can you tell from the UMAP alone whether fibers separate by `time`?
 
 <details>
 
-<summary><strong>Exercise 1.3 — possible answer</strong></summary>
+<summary><strong>Exercise 1.5 — possible answer</strong></summary>
 
-TODO — small `n_neighbors` emphasizes local structure (more, smaller clusters); large `n_neighbors` emphasizes global structure (fewer, broader clusters).
+UMAP often resolves discrete sub-populations into well-separated islands that the linear PCs only show as smooth gradients along a single axis. In this dataset the fiber-type structure (slow / fast) tends to be clearer in UMAP. The `time` effect is more subtle and is usually not what drives the UMAP layout — exactly as in the PCA, the dominant axis is fiber type rather than the perturbation.
 
 </details>
 
-## 1.4 Differential abundance in embedding space — MILO
-
-MILO tests for differential abundance across neighbourhoods of a kNN graph built on the embedding, instead of treating every fiber as independent. It avoids hard clustering and gives a continuous map of where two groups differ in fiber-state space.
-
-```{r milo}
-#| eval: false
-
-# Build a SingleCellExperiment / Milo object from the intensity matrix
-milo_obj <- miloR::Milo(SingleCellExperiment::SingleCellExperiment(
-  assays = list(logcounts = intensities)
-))
-
-milo_obj <- miloR::buildGraph(milo_obj, k = 30, d = 20)
-milo_obj <- miloR::makeNhoods(milo_obj, prop = 0.1, k = 30, d = 20, refined = TRUE)
-milo_obj <- miloR::countCells(milo_obj, meta.data = metadata, sample = "subject_id")
-
-design <- metadata %>% distinct(subject_id, time)
-da_res  <- miloR::testNhoods(milo_obj, design = ~ time, design.df = design)
-
-miloR::plotNhoodGraphDA(milo_obj, da_res, layout = "UMAP", alpha = 0.1)
-```
-
-> **Exercise 1.4**: Which neighbourhoods are enriched in `post` vs `pre`? Do they correspond to a specific fiber type, subject, or a more diffuse region of the embedding?
+> **Exercise 1.6**: UMAP has two knobs that change the layout substantially. Try varying each in turn and re-plot.
+>
+> 1.  Re-run UMAP with `n.neighbors = 5` and `n.neighbors = 100`. How does each value emphasize local vs. global structure?
+>
+> 2.  Re-run UMAP using only the first 5 PCs (`dims = 1:5`) and 30 PCs (`dims = 1:30`). What does the input dimensionality control?
 
 <details>
 
-<summary><strong>Exercise 1.4 — possible answer</strong></summary>
+<summary><strong>Exercise 1.6.1 — solution</strong></summary>
 
-TODO.
+A Seurat object can hold multiple UMAP reductions side-by-side via `reduction.name`, so we don't need to rebuild the object:
+
+```{r ex-1-6-1}
+#| eval: true
+
+seu <- Seurat::RunUMAP(seu, dims = 1:20, n.neighbors = 5,
+                       reduction.name = "umap_n5",   verbose = FALSE)
+seu <- Seurat::RunUMAP(seu, dims = 1:20, n.neighbors = 100,
+                       reduction.name = "umap_n100", verbose = FALSE)
+
+Seurat::DimPlot(seu, reduction = "umap_n5",   group.by = "time", pt.size = 0.4) +
+  ggplot2::ggtitle("n.neighbors = 5")
+
+Seurat::DimPlot(seu, reduction = "umap_n100", group.by = "time", pt.size = 0.4) +
+  ggplot2::ggtitle("n.neighbors = 100")
+```
+
+Small `n.neighbors` emphasizes very local structure (more, smaller islands; noisier layout). Large `n.neighbors` emphasizes global structure (fewer, broader clusters; closer to a PCA-like view).
+
+</details>
+
+<details>
+
+<summary><strong>Exercise 1.6.2 — solution</strong></summary>
+
+```{r ex-1-6-2}
+#| eval: true
+
+seu <- Seurat::RunUMAP(seu, dims = 1:5,
+                       reduction.name = "umap_d5",  verbose = FALSE)
+seu <- Seurat::RunUMAP(seu, dims = 1:30,
+                       reduction.name = "umap_d30", verbose = FALSE)
+
+Seurat::DimPlot(seu, reduction = "umap_d5",  group.by = "time", pt.size = 0.4) +
+  ggplot2::ggtitle("dims = 1:5")
+
+Seurat::DimPlot(seu, reduction = "umap_d30", group.by = "time", pt.size = 0.4) +
+  ggplot2::ggtitle("dims = 1:30")
+```
+
+`dims` controls how many PCs feed into the neighbour graph. With only 5 PCs, UMAP sees a low-resolution summary of the data — fine for the dominant axis, but it discards the variation captured by later PCs. With 30, more biology and more noise both enter; the layout is richer but can become unstable, especially if many of those PCs carry mostly noise. The scree plot from Exercise 1.2 is a good guide — pick `dims` up to where the variance curve flattens.
+
+</details>
+
+## 1.4 Clustering and fiber-type annotation
+
+The UMAP shows several distinct populations. We can now (1) hard-cluster the fibers on the kNN graph we already built, (2) label each cluster as **fast** or **slow** based on the dominant myosin heavy chain, and (3) carry that label downstream into the MILO model. Canonical markers in human skeletal muscle:
+
+| Marker | Fiber type            |
+|--------|-----------------------|
+| MYH7   | Type I (slow oxidative)        |
+| MYH2   | Type IIa (fast oxidative/glycolytic) |
+
+```{r clustering}
+#| eval: true
+
+# FindNeighbors uses the PCA reduction we already injected; FindClusters runs
+# Louvain on that graph.
+seu <- Seurat::FindNeighbors(seu, dims = 1:20, verbose = FALSE)
+seu <- Seurat::FindClusters(seu, resolution = 0.5, verbose = FALSE)
+
+Seurat::DimPlot(seu, reduction = "umap", group.by = "seurat_clusters",
+                pt.size = 0.4, label = TRUE) +
+  ggplot2::ggtitle("UMAP clusters")
+```
+
+```{r myosin-featureplot}
+#| eval: true
+
+# Confirm which clusters are slow (MYH7-high) vs fast (MYH2-high)
+Seurat::FeaturePlot(seu, features = c("MYH7", "MYH2"),
+                    reduction = "umap", pt.size = 0.4, order = TRUE) &
+  ggplot2::scale_colour_viridis_c()
+```
+
+```{r assign-fiber-type}
+#| eval: true
+
+# Per-cluster mean intensity for the two myosin markers
+cluster_myh <- tibble::tibble(
+    fiber_id = colnames(seu),
+    cluster  = as.character(seu$seurat_clusters),
+    MYH7     = intensities["MYH7", colnames(seu)],
+    MYH2     = intensities["MYH2", colnames(seu)]
+  ) %>%
+  group_by(cluster) %>%
+  summarise(
+    MYH7 = mean(MYH7, na.rm = TRUE),
+    MYH2 = mean(MYH2, na.rm = TRUE),
+    n    = dplyr::n(),
+    .groups = "drop"
+  ) %>%
+  mutate(fiber_type = ifelse(MYH2 > MYH7, "fast", "slow"))
+
+cluster_myh
+
+# Push the fiber_type label back onto seu and metadata
+fiber_type_map <- setNames(cluster_myh$fiber_type, cluster_myh$cluster)
+seu$fiber_type <- unname(fiber_type_map[as.character(seu$seurat_clusters)])
+
+metadata <- metadata %>%
+  left_join(
+    tibble::tibble(fiber_id   = colnames(seu),
+                   fiber_type = seu$fiber_type),
+    by = "fiber_id"
+  )
+
+# Sanity check on the UMAP
+Seurat::DimPlot(seu, reduction = "umap", group.by = "fiber_type",
+                pt.size = 0.4) +
+  ggplot2::ggtitle("UMAP coloured by fiber type")
+```
+
+> **Exercise 1.7**: ACTN3 is another well-established fast-fiber marker. Use `FeaturePlot` to confirm that the clusters you labelled as `"fast"` also show elevated ACTN3 — if they don't, your fiber-type assignment may need rechecking.
+
+<details>
+
+<summary><strong>Exercise 1.7 — solution</strong></summary>
+
+```{r ex-1-7}
+#| eval: true
+
+Seurat::FeaturePlot(seu, features = "ACTN3", reduction = "umap",
+                    pt.size = 0.4, order = TRUE) +
+  ggplot2::scale_colour_viridis_c()
+```
+
+</details>
+
+## 1.5 Differential abundance in embedding space — MILO
+
+MILO tests for differential abundance across neighbourhoods of a kNN graph built on the embedding, instead of treating every fiber as independent. It avoids hard clustering and gives a continuous map of where two groups differ in fiber-state space.
+
+Now that every fiber carries a `fiber_type` label we can refine the design: define the biological sample as `subject × time × fiber_type` (4 samples per subject, 32 total) and ask **two** questions of the data:
+
+1. **Main effect** — block on subject and fiber type and test the time effect averaged across both fiber types.
+2. **Stratified by fiber type** — fit a separate `post − pre` contrast within fast fibers and within slow fibers, then **count and compare** how many neighbourhoods are significant in each. If one fiber type responds more to the perturbation, it should show more (or larger-magnitude) significant neighbourhoods.
+
+```{r milo}
+#| eval: true
+
+# --- Build a local metadata table with the biological "sample" column ---
+# MILO counts how many fibers from each sample fall in each neighbourhood,
+# so `sample` must group fibers, NOT identify them. With fiber_type now
+# available, each (subject, time, fiber_type) cell is one biological sample.
+#
+# We pull `fiber_type` directly from `seu` so this chunk works regardless of
+# whether `metadata` was reset by re-running an upstream chunk.
+stopifnot("fiber_type" %in% colnames(seu@meta.data))
+
+md <- metadata %>%
+  mutate(sample_id = paste(subject_id, time, fiber_type, sep = "_")) %>%
+  as.data.frame()
+rownames(md) <- md$fiber_id
+
+# Column order of the SCE assay must match metadata row order so colData lines up
+imp_mat <- as.matrix(imp)[, md$fiber_id]
+
+sce <- SingleCellExperiment::SingleCellExperiment(
+  assays  = list(logcounts = imp_mat),
+  colData = md
+)
+
+# --- Reuse the PCs and UMAP coordinates from Sections 1.1 and 1.3 ---
+# Sharing coordinates across all three steps (PCA -> UMAP -> MILO) means the
+# neighbourhood map shown by plotNhoodGraphDA() is the SAME embedding the
+# students saw earlier in the Seurat DimPlot, not a re-computation that
+# would shuffle / rotate the layout.
+SingleCellExperiment::reducedDim(sce, "PCA")  <- pca_res$x[colnames(sce), 1:30]
+SingleCellExperiment::reducedDim(sce, "UMAP") <-
+  Seurat::Embeddings(seu, "umap")[colnames(sce), ]
+
+milo_obj <- miloR::Milo(sce)
+milo_obj <- miloR::buildGraph(milo_obj,  k = 30, d = 20, reduced.dim = "PCA")
+milo_obj <- miloR::makeNhoods(milo_obj,  prop = 0.1, k = 30, d = 20,
+                              refined = TRUE, reduced_dims = "PCA")
+milo_obj <- miloR::countCells(milo_obj,  meta.data = md, sample = "sample_id")
+milo_obj <- miloR::buildNhoodGraph(milo_obj)
+
+# --- Design table: one row per sample_id ---
+design <- md %>%
+  distinct(sample_id, subject_id, time, fiber_type) %>%
+  as.data.frame()
+rownames(design) <- design$sample_id
+
+# Set explicit reference levels so the contrast names are predictable
+design$time       <- factor(design$time,       levels = c("pre",  "post"))
+design$fiber_type <- factor(design$fiber_type, levels = c("fast", "slow"))
+
+# Combined cell-means factor (fast_pre / fast_post / slow_pre / slow_post).
+# This avoids colon-named interaction terms, which makeContrasts() can't parse.
+design$group <- factor(
+  paste(design$fiber_type, design$time, sep = "_"),
+  levels = c("fast_pre", "fast_post", "slow_pre", "slow_post")
+)
+
+# 1) MAIN effect: post vs pre, blocking on subject and fiber_type
+da_time <- miloR::testNhoods(milo_obj,
+                             design    = ~ subject_id + fiber_type + time,
+                             design.df = design)
+
+# 2) Time effect WITHIN each fiber type, as two separate contrasts on the
+#    `group` factor. We drop the intercept (`~ 0 + group + ...`) so that all
+#    four group levels show up as named coefficients — otherwise the reference
+#    level (`fast_pre`) is absorbed into the intercept and the contrast
+#    `groupfast_post - groupfast_pre` would fail. Same neighbourhoods for both
+#    contrasts, so the resulting counts are directly comparable.
+da_fast <- miloR::testNhoods(
+  milo_obj,
+  design          = ~ 0 + group + subject_id,
+  design.df       = design,
+  model.contrasts = "groupfast_post - groupfast_pre"
+)
+
+da_slow <- miloR::testNhoods(
+  milo_obj,
+  design          = ~ 0 + group + subject_id,
+  design.df       = design,
+  model.contrasts = "groupslow_post - groupslow_pre"
+)
+
+# --- Count significant neighbourhoods per fiber type ---
+da_counts <- tibble::tibble(
+  fiber_type = c("fast", "slow"),
+  n_total    = c(nrow(da_fast), nrow(da_slow)),
+  n_sig      = c(sum(da_fast$SpatialFDR < 0.1, na.rm = TRUE),
+                 sum(da_slow$SpatialFDR < 0.1, na.rm = TRUE)),
+  n_up       = c(sum(da_fast$SpatialFDR < 0.1 & da_fast$logFC > 0, na.rm = TRUE),
+                 sum(da_slow$SpatialFDR < 0.1 & da_slow$logFC > 0, na.rm = TRUE)),
+  n_down     = c(sum(da_fast$SpatialFDR < 0.1 & da_fast$logFC < 0, na.rm = TRUE),
+                 sum(da_slow$SpatialFDR < 0.1 & da_slow$logFC < 0, na.rm = TRUE))
+)
+
+da_counts
+
+# --- Bar chart: significant neighbourhoods per fiber type ---
+da_counts %>%
+  tidyr::pivot_longer(c(n_up, n_down),
+                      names_to = "direction", values_to = "n") %>%
+  mutate(direction = recode(direction,
+                            n_up   = "post > pre",
+                            n_down = "pre > post")) %>%
+  ggplot(aes(fiber_type, n, fill = direction)) +
+  geom_col(position = "dodge") +
+  theme_minimal() +
+  labs(x = "Fiber type",
+       y = "Significant neighbourhoods (SpatialFDR < 0.1)",
+       fill = NULL)
+
+# --- The MILO maps themselves: where in fiber-state space each type changes ---
+miloR::plotNhoodGraphDA(milo_obj, da_time, layout = "UMAP", alpha = 0.1) +
+  ggplot2::ggtitle("Main time effect (post vs. pre)")
+
+miloR::plotNhoodGraphDA(milo_obj, da_fast, layout = "UMAP", alpha = 0.1) +
+  ggplot2::ggtitle("post vs. pre — fast fibers")
+
+miloR::plotNhoodGraphDA(milo_obj, da_slow, layout = "UMAP", alpha = 0.1) +
+  ggplot2::ggtitle("post vs. pre — slow fibers")
+```
+
+> **Exercise 1.8**: Look at the `da_counts` table and the bar chart.
+>
+> 1.  Which fiber type has more significant neighbourhoods between `pre` and `post`?
+>
+> 2.  In each fiber type, are the changes mostly in one direction (more fibers in `post`) or balanced between gain and loss?
+>
+> 3.  Cross-check against the two MILO maps — do the significant neighbourhoods for the fast contrast sit in the fast-dominant region of the UMAP, and likewise for slow? If a contrast lights up neighbourhoods that are dominated by the *other* fiber type, what does that tell you about how confident the count comparison should make you?
+
+<details>
+
+<summary><strong>Exercise 1.8 — possible answer</strong></summary>
+
+TODO — depends on the dataset.
+
+The interpretation pattern to look for:
+
+-   If one fiber type has many more significant neighbourhoods than the other, that fiber type is more responsive to the perturbation. Pay attention to the *direction* too — `post > pre` and `pre > post` counts can tell you whether the population is expanding or shrinking in fiber-state space.
+-   A contrast (e.g. fast `post − pre`) tests counts of *fast* fibers in every neighbourhood. Neighbourhoods that are essentially all-slow have near-zero fast counts and won't pass the significance threshold no matter what — so the count comparison is fair only where each fiber type has enough cells to power the test. The two MILO maps make this visible: if the `fast` map only shows significant nhoods in the fast-dominant region, the test is doing the right thing.
 
 </details>
 
@@ -431,7 +709,7 @@ The model fitted upstream (a per-protein GAM with `s(PC1, by = time)` and a subj
 Results are stored as a **named list** — one entry per gene, each entry containing a one-row tibble `model_results`. We start by flattening it into a tidy data frame for plotting.
 
 ```{r da-input}
-#| eval: false
+#| eval: true
 
 model_list <- readRDS("results/model_results.rds")
 
@@ -446,15 +724,31 @@ da_results <- dplyr::bind_rows(lapply(model_list, `[[`, "model_results")) %>%
 head(da_results)
 ```
 
+A quick orientation before we start visualising — how many proteins fail each null at `adj_p < 0.05`?
+
+```{r da-summary}
+#| eval: true
+
+da_results %>%
+  summarise(
+    n_total       = dplyr::n(),
+    n_time        = sum(adj_p_time        < 0.05, na.rm = TRUE),
+    n_fiber_type  = sum(adj_p_fiber_type  < 0.05, na.rm = TRUE),
+    n_interaction = sum(adj_p_interaction < 0.05, na.rm = TRUE),
+    n_time_up     = sum(adj_p_time < 0.05 & Estimate_time1 > 0, na.rm = TRUE),
+    n_time_down   = sum(adj_p_time < 0.05 & Estimate_time1 < 0, na.rm = TRUE)
+  )
+```
+
 ## 2.1 Boxplots of single features
 
 The first sanity check after any DA result is to look at the raw intensities of a few top hits, stratified by the variable of interest.
 
 ```{r boxplot-feature}
-#| eval: false
+#| eval: true
 
 # Pick a top hit on the time effect
-feature <- da_results %>% arrange(`Pr(>|t|)_time1`) %>% slice(1) %>% pull(gene)
+feature <- da_results %>% arrange(`Pr(>|t|)_time1`) %>% dplyr::slice(1) %>% pull(gene)
 
 plot_df <- tibble(
   fiber_id  = colnames(intensities),
@@ -469,13 +763,66 @@ ggplot(plot_df, aes(time, intensity, fill = time)) +
   labs(title = feature, y = "log2 intensity")
 ```
 
-> **Exercise 2.1**: Pick three proteins from the top of `da_results` (sorted by `Pr(>|t|)_time1`) and three from the bottom. Does the boxplot pattern match the test statistic?
+> **Exercise 2.1**: Use the example chunk above as a template.
+>
+> 1.  Pick a protein that is **not significant** for the time test (e.g. one with `adj_p_time > 0.5`) and reproduce the boxplot. Does the lack of a `pre → post` shift match the test statistic?
+>
+> 2.  Redraw the boxplot of the top time hit (`S100A13`) coloured by `subject_id`, with one line per subject connecting their `pre` and `post` means. Is the shift consistent across all 8 subjects, or driven by a few?
 
 <details>
 
-<summary><strong>Exercise 2.1 — possible answer</strong></summary>
+<summary><strong>Exercise 2.1.1 — solution</strong></summary>
 
-TODO.
+```{r ex-2-1-1}
+#| eval: true
+
+nonsig_feature <- da_results %>%
+  filter(adj_p_time > 0.5) %>%
+  dplyr::slice(1) %>%
+  pull(gene)
+
+plot_df <- tibble(
+  fiber_id  = colnames(intensities),
+  intensity = intensities[nonsig_feature, ]
+) %>%
+  left_join(metadata, by = "fiber_id")
+
+ggplot(plot_df, aes(time, intensity, fill = time)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.6) +
+  geom_jitter(width = 0.2, size = 0.3, alpha = 0.3) +
+  theme_minimal() +
+  labs(title = nonsig_feature, y = "log2 intensity")
+```
+
+Compared to a top hit, the two boxes should overlap heavily and the medians sit on essentially the same line.
+
+</details>
+
+<details>
+
+<summary><strong>Exercise 2.1.2 — solution</strong></summary>
+
+```{r ex-2-1-2}
+#| eval: true
+
+feature <- "S100A13"
+
+plot_df <- tibble(
+  fiber_id  = colnames(intensities),
+  intensity = intensities[feature, ]
+) %>%
+  left_join(metadata, by = "fiber_id") %>%
+  group_by(subject_id, time) %>%
+  summarise(intensity = mean(intensity, na.rm = TRUE), .groups = "drop")
+
+ggplot(plot_df, aes(time, intensity, group = subject_id, colour = subject_id)) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 2) +
+  theme_minimal() +
+  labs(title = feature, y = "log2 intensity (subject mean)")
+```
+
+If all 8 lines slope in the same direction, the effect is consistent. If a couple of subjects buck the trend, the population estimate is being pulled by a subset.
 
 </details>
 
@@ -484,27 +831,101 @@ TODO.
 A volcano plot shows effect size (`Estimate_time1`, the log2FC of `post − pre`) on the x-axis against statistical significance (`-log10 p-value`) on the y-axis. It is the standard one-glance summary of a DA analysis.
 
 ```{r volcano}
-#| eval: false
+#| eval: true
 
-EnhancedVolcano::EnhancedVolcano(
-  da_results,
-  lab        = da_results$gene,
-  x          = "Estimate_time1",
-  y          = "adj_p_time",
-  pCutoff    = 0.05,
-  FCcutoff   = 0.5,
-  title      = "Differential abundance",
-  subtitle   = "post vs. pre"
-)
+# Annotate each protein as significant or not, build a rich hover label,
+# then build the volcano in ggplot and pipe it through plotly for hover.
+volcano_df <- da_results %>%
+  mutate(
+    sig   = factor(ifelse(adj_p_time < 0.05, "adj_p < 0.05", "n.s."),
+                   levels = c("n.s.", "adj_p < 0.05")),
+    label = paste0(
+      "gene: ",  gene,
+      "<br>log2FC: ", signif(Estimate_time1, 3),
+      "<br>adj_p: ", signif(adj_p_time, 3)
+    )
+  )
+
+p_volcano <- ggplot(
+    volcano_df,
+    aes(x = Estimate_time1, y = -log10(`Pr(>|t|)_time1`),
+        colour = sig, text = label)
+  ) +
+  geom_point(alpha = 0.6, size = 1.2) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", colour = "grey60") +
+  geom_vline(xintercept = 0,            linetype = "dashed", colour = "grey60") +
+  scale_colour_manual(values = c("n.s." = "grey70", "adj_p < 0.05" = "firebrick")) +
+  theme_minimal() +
+  labs(x = "log2FC (post − pre)", y = "-log10(p-value)",
+       colour = NULL,
+       title = "Differential abundance: post vs. pre")
+
+# Static ggplot (useful for reports / printed handouts)
+p_volcano
+
+# Interactive plotly version — hover any dot to see gene name and stats
+plotly::ggplotly(p_volcano, tooltip = "text")
 ```
 
-> **Exercise 2.2**: How many proteins are significant at `adj_p_time < 0.05`? Are the hits symmetric around `Estimate_time1 = 0`, or biased toward one direction? What would asymmetry suggest biologically?
+> **Exercise 2.2**:
+>
+> 1.  Read off the volcano: how many proteins are significant at `adj_p_time < 0.05`, and is the cloud symmetric around `Estimate_time1 = 0`? Use the interactive plotly version — hover over the upper-right and upper-left of the cloud and write down the top few up- and down-regulated genes.
+>
+> 2.  Redraw the volcano with the same ggplot + plotly template, but using **PC1 loading vs. fiber-type p-value**. PC1 loading lives in `pca_res$rotation[, "PC1"]` — join it onto `da_results` to use it as the x-axis, and put `p_val_fiber_type` on the y-axis. Are there more or fewer hits than in the time volcano?
 
 <details>
 
-<summary><strong>Exercise 2.2 — possible answer</strong></summary>
+<summary><strong>Exercise 2.2.1 — possible answer</strong></summary>
 
-TODO.
+On this dataset, **1,513 / 2,373 proteins (64 %)** have `adj_p_time < 0.05`. The cloud is biased upward — **971 hits go up** (`Estimate_time1 > 0`) vs. 542 down. The perturbation produces a net increase in more proteins than it decreases, suggesting an overall "induction" response rather than a balanced rewiring.
+
+Hovering the upper-right of the plot you should find genes like `S100A13`, `HSPB6`, `CES2`; the upper-left should show down-regulated hits.
+
+</details>
+
+<details>
+
+<summary><strong>Exercise 2.2.2 — solution</strong></summary>
+
+```{r ex-2-2-2}
+#| eval: true
+
+# Join PC1 loading onto da_results so we can use it as the x-axis
+pc1_load <- tibble(
+  gene        = rownames(pca_res$rotation),
+  pc1_loading = pca_res$rotation[, "PC1"]
+)
+
+volcano_pc1_df <- da_results %>%
+  left_join(pc1_load, by = "gene") %>%
+  mutate(
+    sig   = factor(ifelse(adj_p_fiber_type < 0.05, "adj_p < 0.05", "n.s."),
+                   levels = c("n.s.", "adj_p < 0.05")),
+    label = paste0(
+      "gene: ",         gene,
+      "<br>PC1 loading: ", signif(pc1_loading, 3),
+      "<br>adj_p: ",       signif(adj_p_fiber_type, 3)
+    )
+  )
+
+p_volcano_pc1 <- ggplot(
+    volcano_pc1_df,
+    aes(x = pc1_loading, y = -log10(p_val_fiber_type),
+        colour = sig, text = label)
+  ) +
+  geom_point(alpha = 0.6, size = 1.2) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", colour = "grey60") +
+  geom_vline(xintercept = 0,            linetype = "dashed", colour = "grey60") +
+  scale_colour_manual(values = c("n.s." = "grey70", "adj_p < 0.05" = "firebrick")) +
+  theme_minimal() +
+  labs(x = "PC1 loading", y = "-log10(adj. p-value)",
+       colour = NULL,
+       title = "Fiber-type axis (PC1) vs. GAM p-value")
+
+plotly::ggplotly(p_volcano_pc1, tooltip = "text")
+```
+
+The fiber-type volcano shows many more hits (**2,223 of 2,373**) than the time volcano — PC1 is the dominant axis in the data, so almost every protein co-varies with it to some degree.Perhaps a volcano plot is not the best way to explore the associations between protein intensities and fiber type, and a heatmap of the associated features across PC1 would be more informative and reveal abundance patterns across the fiber type spectrum.
 
 </details>
 
@@ -513,23 +934,63 @@ TODO.
 Overlaying a single protein's intensity onto the UMAP embedding shows *where* in fiber-state space that protein is high or low — often more informative than a boxplot when the contrast is driven by a sub-population.
 
 ```{r umap-feature}
-#| eval: false
+#| eval: true
 
-feature <- da_results %>% arrange(p_val_fiber_type) %>% slice(1) %>% pull(gene)
+feature <- da_results %>%
+    dplyr::filter(gene == "MYH7") |>
+    pull(gene)
 
 Seurat::FeaturePlot(seu, features = feature, reduction = "umap",
                     pt.size = 0.4, order = TRUE) +
   ggplot2::scale_colour_viridis_c()
 ```
 
+> **Exercise 2.3**:
+>
+> 1.  The example uses a classic **fiber-type** hit. Reproduce the feature plot for the top **time** hit (`S100A13`). Is the protein's expression concentrated in one UMAP region, or does it shift more uniformly across the embedding?
+>
+> 2.  Repeat for the top **interaction** hit (`ALDH1B1`). Compare to the time-hit map — does the interaction-driven protein localize differently?
+
+<details>
+
+<summary><strong>Exercise 2.3.1 — solution</strong></summary>
+
+```{r ex-2-3-1}
+#| eval: true
+
+Seurat::FeaturePlot(seu, features = "S100A13", reduction = "umap",
+                    pt.size = 0.4, order = TRUE) +
+  ggplot2::scale_colour_viridis_c()
+```
+
+`S100A13`'s effect is largely **fiber-type-agnostic** — a top time hit tends to shift across most of the UMAP, not just one cluster.
+
+</details>
+
+<details>
+
+<summary><strong>Exercise 2.3.2 — solution</strong></summary>
+
+```{r ex-2-3-2}
+#| eval: true
+
+Seurat::FeaturePlot(seu, features = "ALDH1B1", reduction = "umap",
+                    pt.size = 0.4, order = TRUE) +
+  ggplot2::scale_colour_viridis_c()
+```
+
+`ALDH1B1` is both a top time hit **and** a top interaction hit — so the time-driven shift is concentrated in one fiber-type region rather than spread uniformly. This is the visual signature of a `time × fiber_type` interaction.
+
+</details>
+
 ## 2.4 Association of protein intensity with PC1 (fiber type)
 
 `p_val_fiber_type` tests whether a protein's intensity varies along PC1. For a top fiber-type hit, the relationship should be obvious in a scatter of intensity vs. PC1.
 
 ```{r intensity-vs-pc1}
-#| eval: false
+#| eval: true
 
-feature <- da_results %>% arrange(p_val_fiber_type) %>% slice(1) %>% pull(gene)
+feature <- da_results %>% arrange(p_val_fiber_type) %>% dplyr::slice(1) %>% pull(gene)
 
 plot_df <- tibble(
   fiber_id  = colnames(intensities),
@@ -544,13 +1005,61 @@ ggplot(plot_df, aes(PC1, intensity)) +
   labs(title = feature, x = "PC1 (fiber-type axis)", y = "log2 intensity")
 ```
 
-> **Exercise 2.3**: Pick a protein with very small `p_val_fiber_type` and one with very large `p_val_fiber_type`. Compare their scatter plots against PC1. Does the test result match what you see?
+> **Exercise 2.4**:
+>
+> 1.  Reproduce the scatter for a protein with **very high** `p_val_fiber_type` (e.g. `C4orf54`) and compare it visually to the top hit (`GATD3B`). Does the test result match what you see in the cloud?
+>
+> 2.  Compute the Pearson correlation between intensity and PC1 for both proteins and confirm.
 
 <details>
 
-<summary><strong>Exercise 2.3 — possible answer</strong></summary>
+<summary><strong>Exercise 2.4.1 — solution</strong></summary>
 
-For a top fiber-type hit, the points form a clear monotonic trend along PC1 (\|Pearson r\| typically \> 0.8 on this dataset). For a non-significant protein the cloud is essentially flat. The GAM smoother lets you see whether the relationship is linear or curved.
+```{r ex-2-4-1}
+#| eval: true
+
+plot_one <- function(gene) {
+  plot_df <- tibble(
+    fiber_id  = colnames(intensities),
+    intensity = intensities[gene, ]
+  ) %>%
+    left_join(metadata, by = "fiber_id")
+
+  ggplot(plot_df, aes(PC1, intensity)) +
+    geom_point(size = 0.4, alpha = 0.4) +
+    geom_smooth(method = "gam", formula = y ~ s(x), se = TRUE) +
+    theme_minimal() +
+    labs(title = gene, x = "PC1", y = "log2 intensity")
+}
+
+plot_one("GATD3B")   # top fiber-type hit
+plot_one("C4orf54")  # not significant for fiber type
+```
+
+`GATD3B` shows a clean monotonic gradient with PC1; `C4orf54`'s cloud is flat.
+
+</details>
+
+<details>
+
+<summary><strong>Exercise 2.4.2 — solution</strong></summary>
+
+```{r ex-2-4-2}
+#| eval: true
+
+cor_with_pc1 <- function(gene) {
+  vals <- intensities[gene, ]
+  ok   <- !is.na(vals)
+  cor(vals[ok], metadata$PC1[ok])
+}
+
+c(
+  GATD3B  = cor_with_pc1("GATD3B"),
+  C4orf54 = cor_with_pc1("C4orf54")
+)
+```
+
+`GATD3B` should give |cor| roughly between 0.6 and 0.9; `C4orf54` should be close to 0.
 
 </details>
 
@@ -559,9 +1068,9 @@ For a top fiber-type hit, the points form a clear monotonic trend along PC1 (\|P
 `p_val_interaction` flags proteins whose PC1 dependence **differs between pre and post** — i.e. the time effect is fiber-type-specific. The cleanest visualization is intensity vs. PC1, split by time:
 
 ```{r interaction-plot}
-#| eval: false
+#| eval: true
 
-feature <- da_results %>% arrange(p_val_interaction) %>% slice(1) %>% pull(gene)
+feature <- da_results %>% arrange(p_val_interaction) %>% dplyr::slice(1) %>% pull(gene)
 
 plot_df <- tibble(
   fiber_id  = colnames(intensities),
@@ -577,13 +1086,53 @@ ggplot(plot_df, aes(PC1, intensity, colour = time, fill = time)) +
        subtitle = "Two curves with different slopes => significant interaction")
 ```
 
-> **Exercise 2.4**: For a top interaction hit, do the two smoothers (pre, post) cross or diverge? What does that pattern imply biologically — that the response to the perturbation is stronger in one fiber type than the other?
+> **Exercise 2.5**:
+>
+> 1.  Make the same `intensity ~ PC1` plot, split by `time`, for a protein that has a **strong time effect but no interaction** — e.g. `S100A13` (top time hit, weak interaction). Are the two smoothers roughly parallel?
+>
+> 2.  Repeat for `ALDH1B1`, which is a top hit for **both** time and interaction. Do the two smoothers cross or just diverge? What does that pattern imply biologically?
 
 <details>
 
-<summary><strong>Exercise 2.4 — possible answer</strong></summary>
+<summary><strong>Exercise 2.5.1 — solution</strong></summary>
 
-A significant `p_val_interaction` means the slope of intensity vs. PC1 is different in pre vs. post fibers. If the two curves diverge as \|PC1\| grows, the time effect is amplified in the more extreme fibers (e.g. only fast fibers respond). If they cross, the direction of the time effect flips between fiber types.
+```{r ex-2-5-1}
+#| eval: true
+
+plot_interaction <- function(gene) {
+  plot_df <- tibble(
+    fiber_id  = colnames(intensities),
+    intensity = intensities[gene, ]
+  ) %>%
+    left_join(metadata, by = "fiber_id")
+
+  ggplot(plot_df, aes(PC1, intensity, colour = time, fill = time)) +
+    geom_point(size = 0.4, alpha = 0.3) +
+    geom_smooth(method = "gam", formula = y ~ s(x), se = TRUE, alpha = 0.2) +
+    theme_minimal() +
+    labs(title = gene, x = "PC1", y = "log2 intensity")
+}
+
+plot_interaction("S100A13")
+```
+
+For a pure time effect, the two smoothers should sit at different `y`-levels but track the same shape — vertically shifted but **parallel**. That visual is the signature of "time effect, no interaction".
+
+</details>
+
+<details>
+
+<summary><strong>Exercise 2.5.2 — solution</strong></summary>
+
+```{r ex-2-5-2}
+#| eval: true
+
+plot_interaction("ALDH1B1")
+```
+
+`ALDH1B1` is a top hit for both `Pr(>|t|)_time1` and `p_val_interaction`. The two smoothers should be clearly **non-parallel** — the gap between pre and post widens (or narrows) along PC1.
+
+Biologically: a significant interaction means the `post − pre` change is not uniform across fibers — one fiber-type tail responds more than the other. If the curves *cross*, the direction of the time effect flips between fiber types; if they only *diverge*, one fiber type responds and the other barely does. Either pattern is what triggers a small `p_val_interaction` in the GAM.
 
 </details>
 
@@ -596,7 +1145,7 @@ A volcano plot tells you *which* proteins change, but not whether they change *t
 ## 3.1 Heatmap of differentially abundant proteins
 
 ```{r heatmap}
-#| eval: false
+#| eval: true
 
 sig_proteins <- da_results %>%
   filter(adj_p_time < 0.05) %>%
@@ -616,7 +1165,7 @@ mat <- mat[, col_order]
 
 # pheatmap reads annotations from a data frame whose rownames match colnames(mat)
 ann_col <- metadata %>%
-  select(fiber_id, time, PC1) %>%
+  dplyr::select(fiber_id, time, PC1) %>%
   column_to_rownames("fiber_id")
 ann_col <- ann_col[colnames(mat), , drop = FALSE]
 
@@ -646,7 +1195,7 @@ TODO.
 ## 3.2 Extracting module membership
 
 ```{r modules}
-#| eval: false
+#| eval: true
 
 # pheatmap returns the row hclust as `tree_row`; cut it at the same k used above
 module_id <- cutree(ph$tree_row, k = 6)
@@ -660,7 +1209,7 @@ modules %>% count(module)
 For each module, test whether its protein set is enriched for any annotated pathway (Reactome, KEGG, GO BP). Tools: `clusterProfiler`, `fgsea`, `enrichR`.
 
 ```{r enrichment}
-#| eval: false
+#| eval: true
 
 # Per-module over-representation analysis
 # enrich_res <- modules %>%
