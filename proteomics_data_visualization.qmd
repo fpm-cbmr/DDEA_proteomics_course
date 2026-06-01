@@ -82,7 +82,7 @@ The example dataset contains protein intensities for **thousands of single muscl
 #| eval: true
 
 # Load the prepared dataset
-fiber_data <- readRDS("data/single_fiber_proteomics.rds")
+fiber_data <- readRDS("data/single_fiber_proteomics_simulated.rds")
 
 # Inspect structure
 str(fiber_data, max.level = 1)
@@ -156,7 +156,7 @@ flowchart TD
 A single-fiber proteomics matrix has thousands of proteins measured across thousands of fibers — too many dimensions to visualize directly, and most pairs of proteins are correlated. Dimensionality reduction projects the data into a small number of axes that capture the strongest sources of variation, letting us see global structure (fiber types, donors, conditions) in two or three dimensions.
 
 | Method | Type | What it preserves | Use it for |
-|-----------------|-----------------|---------------------|------------------|
+|------------------|------------------|--------------------|------------------|
 | PCA | Linear | Global variance; directions of maximum spread | Detecting dominant gradients / batches |
 | UMAP | Non-linear | Local neighborhood structure | Revealing discrete populations / clusters |
 
@@ -176,6 +176,7 @@ imp <- intensities %>%
     PhosR::tImpute() %>% 
     as.data.frame()
 
+set.seed(42)
 pca_res <- prcomp(t(imp), scale. = TRUE)
 
 # --- Scree plot: % variance explained per PC ---
@@ -292,6 +293,7 @@ summary(lm(PC3 ~ time, data = pc_scores))
 
 # PC1 is associated with time, however, PC3 shows a greater association
 ```
+
 This is helpful to narrow down which PCs carry biological information so we can explore them in detail. However, this doesn't directly tell us which proteins are implicated in the association.
 
 To do that, PCA loadings can be extracted from `pca_res$rotation` and used, for example, as an input for a ranked GSEA test. The ranking statistic here is the **loading of each protein on PC1**, a named weight, where strongly positive and strongly negative loadings both indicate proteins that drive the axis (just in opposite directions).
@@ -350,6 +352,7 @@ top_terms %>%
        y = NULL,
        size = "-log10(p.adjust)")
 ```
+
 Among the different terms, we can see that metabolism-related terms (hence proteins) are important drivers of the variance observed in PC1. If you are familiar with skeletal muscle physiology you might already start thinking that this is likely reflecting fiber type differences in the data. We will examine this in detail below!
 
 > **Exercise 1.4**: PC1 captures the dominant axis of variation in the data, but the other PCs may carry biology too. Repeat the ranked GSEA for **PC2** and **PC3** and inspect their dot plots. What is the dominant biology associated with each? Do any pathways appear on multiple PCs (and what would that mean)?
@@ -514,7 +517,7 @@ umap_df <- Seurat::Embeddings(seu, "umap") %>%
 
 <summary><strong>Exercise 1.5 — possible answer</strong></summary>
 
-UMAP often resolves discrete sub-populations into well-separated islands that the linear PCs only show as smooth gradients along a single axis. In this dataset this could be due to the fiber-type structure (slow / fast). The `time` effect is more subtle and it doesn't create distinct clusters in the UMAP layout. However, it seems like in one of the two fiber populations, pre and post samples are more clearly separated in the UMAP. 
+UMAP often resolves discrete sub-populations into well-separated islands that the linear PCs only show as smooth gradients along a single axis. In this dataset this could be due to the fiber-type structure (slow / fast). The `time` effect is more subtle and it doesn't create distinct clusters in the UMAP layout. However, it seems like in one of the two fiber populations, pre and post samples are more clearly separated in the UMAP.
 
 </details>
 
@@ -588,11 +591,11 @@ Seurat::DimPlot(seu, reduction = "umap_d30", group.by = "time", pt.size = 0.4) +
 
 ## 1.4 Clustering and fiber-type annotation
 
-The UMAP shows two distinct populations. If you are familiar with muscle physiology, you may remember that human muscle fibers can be broadly classified into two fiber types, slow (type 1) or fast (type 2). Each fiber type has distinct metabolic and contractile properties:   
+The UMAP shows two distinct populations. If you are familiar with muscle physiology, you may remember that human muscle fibers can be broadly classified into two fiber types, slow (type 1) or fast (type 2). Each fiber type has distinct metabolic and contractile properties:
 
-| Marker | Fiber type            |
-|--------|-----------------------|
-| MYH7   | Type I (slow oxidative)        |
+| Marker | Fiber type                           |
+|--------|--------------------------------------|
+| MYH7   | Type I (slow oxidative)              |
 | MYH2   | Type IIa (fast oxidative/glycolytic) |
 
 To explore whether our two UMAP populations correspond to the known muscle fiber types, we can extract the UMAP clusters that make the two populations and visualize the expression of known fiber type markers. If we divide this into tasks it would be: (1) hard-cluster the fibers on the kNN graph we already built, (2) label each cluster as **fast** or **slow** based on the dominant myosin heavy chain, and (3) carry that label downstream into our analysis.
@@ -700,8 +703,8 @@ The naive approach is to assign every fiber to a cluster label and count how man
 
 Key advantages over cluster-based DA:
 
-- Fibers on population boundaries contribute to multiple overlapping neighborhoods — no information is discarded at an arbitrary cluster edge.
-- Results are mapped directly back onto the UMAP: each neighborhood is drawn as a dot colored by its log-fold change and significance.
+-   Fibers on population boundaries contribute to multiple overlapping neighborhoods — no information is discarded at an arbitrary cluster edge.
+-   Results are mapped directly back onto the UMAP: each neighborhood is drawn as a dot colored by its log-fold change and significance.
 
 ### Defining the biological sample
 
@@ -712,7 +715,7 @@ MILO counts *samples*, not individual fibers, so we need to define what constitu
 With fiber-type labels available we run three complementary tests:
 
 | Model object | Design formula | Contrast | Question |
-|---|---|---|---|
+|------------------|------------------|------------------|------------------|
 | `da_time` | `~ subject_id + fiber_type + time` | implicit: `post − pre` | Overall time effect, averaged across both fiber types |
 | `da_fast` | `~ 0 + group + subject_id` | `groupfast_post − groupfast_pre` | `post − pre` within fast fibers only |
 | `da_slow` | `~ 0 + group + subject_id` | `groupslow_post − groupslow_pre` | `post − pre` within slow fibers only |
@@ -902,10 +905,10 @@ The statistical results come from a **Generalized Additive Model (GAM)** fitted 
 *Understanding these models in detail is beyond the scope of this session. Focus on what each output column means:*
 
 | Column | Question it answers |
-|-------------------|-----------------------------------------------------|
+|--------------------|----------------------------------------------------|
 | `Estimate_time1` | Effect size (log2FC) of `post` vs. `pre`, averaged over PC1 |
 | `Pr(>|t|)_time1` | Is the protein differentially abundant between `pre` and `post`? |
-| `p_val_fiber_type` | Is the protein's intensity associated with PC1 (i.e. fiber type)? (no exercise effect)|
+| `p_val_fiber_type` | Is the protein's intensity associated with PC1 (i.e. fiber type)? (no exercise effect) |
 | `p_val_interaction` | Does the time effect depend on PC1 (i.e. fiber-type-specific response)? |
 
 Results are stored as a **named list** — one entry per gene, each entry containing a one-row tibble `model_results`. We start by flattening it into a tidy data frame for easier plotting and interpretation. Then, we use Benjamini-Hochberg P-value adjustment for multiple-comparisons.
@@ -1313,7 +1316,7 @@ c(
 )
 ```
 
-`GATD3B` has a much higher |cor| than `C4orf54`, which is close to 0.
+`GATD3B` has a much higher \|cor\| than `C4orf54`, which is close to 0.
 
 </details>
 
@@ -1466,7 +1469,6 @@ Look at the column annotation bars. You will likely notice that the dominant str
 
 A better input for the heatmap is the **model-derived log fold change** rather than raw intensities. The `diff_smooth` slot in each protein's model result contains the GAM-fitted `post − pre` difference evaluated at equally-spaced PC1 grid points — one number per PC1 bin, per protein. This has already been corrected for fiber type, so what remains is purely the exercise effect and how it varies along the fiber-type axis. Using this as the heatmap input lets the clustering reveal co-regulated response patterns rather than the overwhelming fiber-type structure.
 
-
 ```{r diff-smooth-heatmap}
 #| eval: true
 
@@ -1552,6 +1554,7 @@ ph_diff <- pheatmap::pheatmap(
 
 ggplotify::as.ggplot(ph_diff)
 ```
+
 This shows clearer patterns in the data. The next step is to cut the heatmap into slices and check whether the proteins in those clusters form a biologically informative cluster.
 
 ## 3.2 Extracting module membership
@@ -1616,9 +1619,9 @@ Over-representation analysis (ORA) turns a list of proteins into a biological st
 
 Three choices matter:
 
-- **Universe** — always `rownames(intensities)`, i.e. every protein we actually measured. Using the entire human proteome as background would inflate significance because unannotated proteins that were never measured would appear as "not in the module".
-- **Gene ID type** — our protein names are gene symbols (`keyType = "SYMBOL"`).
-- **Multiple testing** — `pAdjustMethod = "BH"` controls the FDR across all tested terms within the module.
+-   **Universe** — always `rownames(intensities)`, i.e. every protein we actually measured. Using the entire human proteome as background would inflate significance because unannotated proteins that were never measured would appear as "not in the module".
+-   **Gene ID type** — our protein names are gene symbols (`keyType = "SYMBOL"`).
+-   **Multiple testing** — `pAdjustMethod = "BH"` controls the FDR across all tested terms within the module.
 
 Let's first check how many proteins are in each module, pick one whose heatmap pattern is interesting, and then run the ORA.
 
@@ -1695,7 +1698,7 @@ ora_df |>
 
 The enriched terms tell you **what the module is doing biologically** or if it doesn't have any common biological features. For example, module 3 is strongly associated with cytoskeleton-related terms and is upregulated after exercise mostly in fast fibers, highlighting a greater remodeling of these proteins after exercise in fast fibers. The heatmap pattern tells you the *when and where*; the ORA tells you the *what*.
 
-> **Exercise 3.1**: What happens if you repeat this pipeline looking at interaction effects? Extract the proteins with an adj.pval for PC1*fiber type interaction < 0.05 and re-run the heatmap, the clustering and the module enrichment. Use the prior code as a template.
+> **Exercise 3.1**: What happens if you repeat this pipeline looking at interaction effects? Extract the proteins with an adj.pval for PC1\*fiber type interaction \< 0.05 and re-run the heatmap, the clustering and the module enrichment. Use the prior code as a template.
 
 ```{r ex-3-1-student}
 #| eval: false
@@ -1876,15 +1879,15 @@ ora_int_df |>
 
 These exercises are designed for students who finish early or want to go deeper. Each one extends a specific section of the tutorial — the section label is noted next to the title.
 
----
+------------------------------------------------------------------------
 
 ### Exercise A — PCA feature selection `(§1.1)`
 
 The choice of which proteins to include in the PCA can strongly influence its output. Re-run `prcomp` three times using different protein subsets and compare the results:
 
-1. **All proteins** (current approach).
-2. **Top 2000 most variable proteins** — filter using `apply(intensities, 1, var, na.rm = TRUE)` and keep the top 2000.
-3. **Time-significant proteins only** — use `sig_proteins` from Section 3.1 (`adj_p_time < 0.05`).
+1.  **All proteins** (current approach).
+2.  **Top 2000 most variable proteins** — filter using `apply(intensities, 1, var, na.rm = TRUE)` and keep the top 2000.
+3.  **Time-significant proteins only** — use `sig_proteins` from Section 3.1 (`adj_p_time < 0.05`).
 
 For each run, extract the variance explained by PC1, plot the scree plot, and test the association of PC1 with `time` using `summary(lm(PC1 ~ time, data = ...))`. Does focusing on a biologically meaningful subset sharpen or weaken the time signal? Why might it sometimes do the opposite?
 
@@ -1895,14 +1898,14 @@ For each run, extract the variance explained by PC1, plot the scree plot, and te
 
 ```
 
----
+------------------------------------------------------------------------
 
 ### Exercise B — MILO sensitivity to neighbourhood parameters `(§1.5)`
 
 MILO results depend on the kNN graph parameters. Re-run the neighbourhood-building step with two alternative values of `k` and `prop` and compare:
 
-1. A **finer** graph: `k = 15, prop = 0.2` (more, smaller neighbourhoods).
-2. A **coarser** graph: `k = 50, prop = 0.05` (fewer, larger neighbourhoods).
+1.  A **finer** graph: `k = 15, prop = 0.2` (more, smaller neighbourhoods).
+2.  A **coarser** graph: `k = 50, prop = 0.05` (fewer, larger neighbourhoods).
 
 For each, re-run `testNhoods` using the same main-effect design (`~ subject_id + fiber_type + time`) and compare: how many total neighbourhoods are created? How many are significant at `SpatialFDR < 0.1`? Do the significant neighbourhoods sit in the same regions of the UMAP? What does this tell you about the robustness of the MILO result?
 
@@ -1913,15 +1916,15 @@ For each, re-run `testNhoods` using the same main-effect design (`~ subject_id +
 
 ```
 
----
+------------------------------------------------------------------------
 
 ### Exercise C — Adding an effect-size filter to the volcano `(§2.2)`
 
 Statistical significance alone does not guarantee biological relevance. A protein can reach `adj_p < 0.05` with a negligible fold change if the sample size is large enough. Extend the volcano from Section 2.2 to apply a minimum effect-size threshold:
 
-1. Re-colour the volcano using three categories: `"n.s."`, `"adj_p only"` (significant but `|Estimate_time1| < 0.5`), and `"sig + |FC| ≥ 0.5"`.
-2. Count proteins in each category. What fraction of the statistically significant hits are removed by the fold-change filter?
-3. Run a GO:BP ORA on the proteins that are significant by adj_p but **below** the FC threshold. Do they enrich for any terms, or is the signal noise?
+1.  Re-colour the volcano using three categories: `"n.s."`, `"adj_p only"` (significant but `|Estimate_time1| < 0.5`), and `"sig + |FC| ≥ 0.5"`.
+2.  Count proteins in each category. What fraction of the statistically significant hits are removed by the fold-change filter?
+3.  Run a GO:BP ORA on the proteins that are significant by adj_p but **below** the FC threshold. Do they enrich for any terms, or is the signal noise?
 
 ```{r ex-C-student}
 #| eval: false
@@ -1930,15 +1933,15 @@ Statistical significance alone does not guarantee biological relevance. A protei
 
 ```
 
----
+------------------------------------------------------------------------
 
 ### Exercise D — navmix K selection `(§3.2)`
 
 In Section 3.2 the BIC plot was used to choose K = 5. Explore how sensitive the biological conclusions are to that choice:
 
-1. Re-run navmix with K = 3 and K = 7 on `diff_mat_clean`.
-2. For each K, render the cluster-annotated heatmap and run ORA on every module (wrap the `enrichGO` call in `lapply` or `purrr::map` over unique cluster IDs).
-3. Compare the top enriched term per module across K = 3, 5, and 7. Do adjacent modules at higher K look like splits of a single module at lower K (same GO terms, more refined)? Or do they capture genuinely new biology?
+1.  Re-run navmix with K = 3 and K = 7 on `diff_mat_clean`.
+2.  For each K, render the cluster-annotated heatmap and run ORA on every module (wrap the `enrichGO` call in `lapply` or `purrr::map` over unique cluster IDs).
+3.  Compare the top enriched term per module across K = 3, 5, and 7. Do adjacent modules at higher K look like splits of a single module at lower K (same GO terms, more refined)? Or do they capture genuinely new biology?
 
 ```{r ex-D-student}
 #| eval: false
@@ -1947,15 +1950,15 @@ In Section 3.2 the BIC plot was used to choose K = 5. Explore how sensitive the 
 
 ```
 
----
+------------------------------------------------------------------------
 
 ### Exercise E — All-module enrichment `(§3.3)`
 
 In Section 3.3 the ORA was run on a single module of interest. Extend it to all five modules in a single loop:
 
-1. Use `purrr::map` or `lapply` to iterate over `unique(tmp.cl$cluster)`, running `enrichGO` on each module's gene list.
-2. Collect the top enriched term (lowest `p.adjust`) per module and display them in a summary table alongside the module size and the heatmap pattern it corresponds to (e.g. "up in slow", "down in fast post-exercise").
-3. Do the five modules tell a coherent biological story together? Are any enriched for the same pathway family, suggesting they are parts of the same biological programme?
+1.  Use `purrr::map` or `lapply` to iterate over `unique(tmp.cl$cluster)`, running `enrichGO` on each module's gene list.
+2.  Collect the top enriched term (lowest `p.adjust`) per module and display them in a summary table alongside the module size and the heatmap pattern it corresponds to (e.g. "up in slow", "down in fast post-exercise").
+3.  Do the five modules tell a coherent biological story together? Are any enriched for the same pathway family, suggesting they are parts of the same biological programme?
 
 ```{r ex-E-student}
 #| eval: false
@@ -1964,15 +1967,15 @@ In Section 3.3 the ORA was run on a single module of interest. Extend it to all 
 
 ```
 
----
+------------------------------------------------------------------------
 
 ### Exercise F — From module to mechanism `(§3.3)`
 
 Pathway enrichment identifies *what* is changing; this exercise asks *why*. Pick the module with the most significant GO:BP term from Exercise E (or Section 3.3):
 
-1. Look up the canonical upstream regulator of that pathway — for example, PGC-1α for oxidative metabolism, NF-κB for inflammation, or AMPK for energy sensing. Check whether the regulator itself is present in `rownames(intensities)`.
-2. If it is measured, plot its intensity vs. PC1 (split by `time`, as in Section 2.5) and look up its `adj_p_time` and `adj_p_interaction` in `da_results`. Is it differentially abundant?
-3. If it is **not** differentially abundant at the protein level, check `model_list` for its `diff_smooth`: does the fitted curve show a consistent direction of change even if it doesn't reach significance? What would this imply about detection power vs. upstream regulation?
+1.  Look up the canonical upstream regulator of that pathway — for example, PGC-1α for oxidative metabolism, NF-κB for inflammation, or AMPK for energy sensing. Check whether the regulator itself is present in `rownames(intensities)`.
+2.  If it is measured, plot its intensity vs. PC1 (split by `time`, as in Section 2.5) and look up its `adj_p_time` and `adj_p_interaction` in `da_results`. Is it differentially abundant?
+3.  If it is **not** differentially abundant at the protein level, check `model_list` for its `diff_smooth`: does the fitted curve show a consistent direction of change even if it doesn't reach significance? What would this imply about detection power vs. upstream regulation?
 
 ```{r ex-F-student}
 #| eval: false
