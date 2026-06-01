@@ -1,0 +1,604 @@
+---
+title: "OBOBliver — DDEA Course June 2026"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: false
+    embed-resources: true
+    theme: cosmo
+execute:
+  warning: false
+  message: false
+---
+
+## How to use this document
+1. Work through each section sequentially — later sections depend on earlier ones.
+2. For each 💡 exercise, write your code in the provided chunk. The chunk below has the answers.
+
+---
+
+## Setup: Install packages
+Run this chunk once before anything else. It takes several minutes on first run.
+
+```{r}
+#| label: install
+#| eval: false
+
+## if you run this code the first time, install these packages first.
+
+
+
+#install.packages(c("tidyverse", "plotly", "sessioninfo"), quiet = TRUE)
+
+#if (!requireNamespace("BiocManager", quietly = TRUE))
+#    install.packages("BiocManager")
+
+#BiocManager::install(c(
+#    "limma",
+#    "EnhancedVolcano",
+#    "clusterProfiler",
+#    "org.Mm.eg.db",
+#    "enrichplot"
+#), ask = FALSE, update = FALSE)
+
+```
+
+### Load libraries
+
+```{r setup, warning = F, message=F}
+
+library(tidyverse)
+library(plotly)
+library(limma)
+library(EnhancedVolcano)
+library(clusterProfiler)
+library(org.Mm.eg.db)
+library(enrichplot)
+
+```
+
+### Load data
+data_norm.tsv is the proteome dataset based on the raw data from https://www.sciencedirect.com/science/article/pii/S1535947622000159
+-> liver proteome from WT (lean) and ob/ob mouse (n=4)
+
+this data was already log2 transformed, filtered, imputed, and normalized.
+
+metadata.tsv contains the metadata with column names and grouping.
+
+
+```{r , warning = F, message=F}
+#| label: load-data
+
+data <- read.delim(here::here("data/data_norm.tsv"))
+metadata <- read.delim(here::here("data/metadata.tsv"))
+
+```
+
+---
+
+## 1. Check data prerequisites for limma
+Limma assumes that data is already log transfomred and normalized, that distributions are comparable across samples, and that there are no (or very few) missing values.
+
+## 💡 Exercise 1: Check the data
+
+Inspect the dataset to verify it meets limma's requirements. 
+- Check the data's normality and compare sample distributions
+- Check for balanced design and missing values
+
+
+```{r exercise 1}
+#| label: ex1-student
+
+# Your code here
+```
+
+```{r exercise 1 answer}
+#| label: ex1-answer
+#| code-fold: true
+#| code-summary: "Show answer"
+
+
+
+head(data)
+print(metadata)
+
+# Reshape to long format for plotting
+data_long <- data |>
+    rownames_to_column("protein") |>
+    pivot_longer(-protein, names_to = "sample", values_to = "intensity") |>
+    left_join(metadata |> rownames_to_column("sample"), by = "sample")
+
+# Boxplot
+ggplot(data_long, aes(x = sample, y = intensity)) +
+    geom_boxplot(outlier.size = 0.5) +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
+
+# Density plot
+ggplot(data_long, aes(x = intensity, colour = sample)) +
+    geom_density() +
+    theme_minimal() +
+    theme(legend.position = "none") +
+    labs(title = "Density of normalised intensities")
+
+# Missing values
+cat("Total NAs:", sum(is.na(data)), "\n")
+print(colSums(is.na(data)))
+
+# Samples per group
+print(table(metadata$condition))
+
+```
+
+---
+
+## 2. Differential expression analysis with limma
+
+We have two groups: lean mice and ob mice. Start by encoding group membership as a factor:
+
+```{r}
+#| label: group-factor
+
+group <- factor(metadata$condition, levels = c("lean", "ob"))
+
+```
+
+## 💡 Exercise 2: Fit the limma model (Approach 1 — no-intercept design)
+
+Use the `~0 +` design so each column of the design matrix represents a group mean directly. Then define an explicit contrast for ob vs lean.
+
+1. Build a design matrix with `model.matrix(~0 + group)` and rename columns
+2. Fit the model with `lmFit()`
+3. Define the contrast `ob - lean` with `makeContrasts()`
+4. Apply the contrast with `contrasts.fit()`, then `eBayes()`
+5. Extract results with `topTable()` (all proteins, BH correction)
+6. Add a `Gene` column from `rownames()`
+
+Store your final results in `results_approach1`.
+
+
+```{r exercise 2}
+#| label: ex2-student
+
+# your code
+
+```
+
+```{r exercise 2 answer}
+#| label: ex2-answer
+#| code-fold: true
+#| code-summary: "Show answer"
+
+# Step 1: design matrix
+design <- model.matrix(~0 + group)
+colnames(design) <- c("lean", "ob")
+
+# Step 2: fit model
+fit_1 <- lmFit(object = data, design = design)
+
+# Step 3: contrast matrix
+contrast_matrix <- makeContrasts(ob - lean, levels = design)
+
+# Step 4: apply contrast + empirical Bayes
+fit_2 <- contrasts.fit(fit_1, contrast_matrix)
+fit_2 <- eBayes(fit_2)
+
+# Step 5-6: extract results and add Gene column
+results_approach1 <- topTable(
+    fit_2,
+    coef          = "ob - lean",
+    number        = Inf,
+    adjust.method = "BH"
+)
+results_approach1$Gene <- rownames(results_approach1)
+
+head(results_approach1)
+```
+
+### Reference: Approach 2 — intercept design
+
+There is a simpler alternative for 2-group comparisons that skips `makeContrasts()`:
+
+```{r}
+#| label: approach2-reference
+#| eval: false
+
+design <- model.matrix(~ group)   # column "groupob" = ob - lean
+fit_1  <- lmFit(object = data, design = design)
+fit_2  <- eBayes(fit_1)
+
+results_approach2 <- topTable(fit_2,
+                               coef          = "groupob",
+                               number        = Inf,
+                               adjust.method = "BH")
+
+results_approach2$Gene <- rownames(results_approach2)
+
+head(results_approach2)
+
+```
+
+> Both approaches give mathematically identical results. But approach 1 becomes necessary when you have 3+ groups and want to define all pairwise contrasts.
+
+---
+
+## 💡 Exercise 3: P-value distribution
+
+Plot a histogram of the raw p-values from `results_approach1`. What does the shape tell you about whether the model is well-specified?
+
+
+```{r}
+#| label: ex3-answer
+#| code-fold: true
+#| code-summary: "Show answer"
+
+ggplot(results_approach1, aes(x = P.Value)) +
+    geom_histogram(bins = 50, fill = "lightpink", colour = "white") +
+    theme_minimal() +
+    labs(
+        title = "Distribution of raw p-values",
+        x     = "Raw p-value",
+        y     = "Count"
+    )
+```
+
+
+
+
+## 3. Visualise limma results
+
+```{r}
+#| label: volcano
+
+EnhancedVolcano(results_approach1,
+                lab = rownames(results_approach1),
+                x   = "logFC",
+                y   = "adj.P.Val")
+
+
+
+
+## There are many different options you can add
+
+#  label top hits
+top_genes <- rownames(results_approach1[order(results_approach1$adj.P.Val), ])[1:5]
+
+EnhancedVolcano(results_approach1,
+                lab = rownames(results_approach1),
+                x   = "logFC",
+                y   = "adj.P.Val",
+
+              # you can add thresholds
+                pCutoff = 0.05,
+                FCcutoff = 4,
+
+                selectLab = top_genes,
+
+                # color by adj.p < 0.05
+                colCustom = NULL,
+                col = c("grey60",      # NS
+                        "grey60",      # FC only (same as NS, we don't want this colored)
+                        "pink",     # p sig only
+                        "purple"),    # p sig + FC
+
+                drawConnectors = TRUE,
+                widthConnectors = 0.4,
+                colConnectors = "grey40",
+                boxedLabels = TRUE,
+                labSize = 4,
+                pointSize = 1.5)
+
+
+
+```
+
+## 💡 Exercise 4: Discussion — interpreting the volcano plot
+
+Discuss with your neighbour: What do  the axes represent? Why do we use -log10 of the adjusted p-value?
+
+
+---
+
+## 4. Gene Set Enrichment Analysis (GSEA)
+
+GSEA uses the full ranked list of proteins (by logFC), no significance threshold needed.
+
+```{r GSEA, warning = F, message=F}
+#| label: gsea
+
+ranked_list <- results_approach1 |>
+    arrange(desc(logFC)) |>
+    (\(df) setNames(df$logFC, df$Gene))()
+
+gsea <- clusterProfiler::gseGO(
+    geneList      = ranked_list,
+    ont           = "ALL",          # "CC", "BP", or "MF" for individual ontologies
+    keyType       = "SYMBOL",
+    minGSSize     = 10,
+    maxGSSize     = 500,
+    pvalueCutoff  = 0.05,
+    verbose       = TRUE,
+    OrgDb         = org.Mm.eg.db,
+    pAdjustMethod = "BH"
+)
+```
+
+
+## 💡 Exercise 5: Visualise GSEA results
+
+Create plots of the GSEA results and discuss what each one shows.
+
+eg you could use:
+`dotplot()`, `enrichplot::gseaplot2()`, `enrichplot::emapplot()`, `enrichplot::treeplot()`, `enrichplot::ridgeplot()`
+For `emapplot` / `treeplot`: first run `enrichplot::pairwise_termsim()` on the gsea object.
+
+What do the different plots represent? 
+
+
+```{r exercise 5}
+#| label: ex5-student
+
+# Your code here
+
+```
+
+```{r exercise 5 answer, warning = F, message=F}
+#| label: ex5-answer
+#| code-fold: true
+#| code-summary: "Show answer"
+
+# Dotplot split by direction
+dotplot(gsea, showCategory = 10, split = ".sign") +
+    facet_grid(. ~ .sign) +
+    ggtitle("GSEA GO — all ontologies")
+
+dotplot(gsea, x = "NES", showCategory = 10, split = ".sign") +
+    facet_grid(. ~ .sign) +
+    ggtitle("GSEA GO — all ontologies")
+
+
+# GSEA enrichment curves for top terms
+gseaplot2(gsea, geneSetID = 1:3, title = "Top 3 enriched GO terms")
+
+# Similarity-based network and tree (require pairwise_termsim first)
+gsea_sim <- enrichplot::pairwise_termsim(gsea)
+emapplot(gsea_sim, showCategory = 10)
+treeplot(gsea_sim)
+
+# Ridge plot of logFC distributions per term
+ridgeplot(gsea, showCategory = 10)
+```
+
+---
+
+## 5. Dealing with redundant GO terms
+
+Many GO terms are semantically similar and will appear together. Run a single ontology to make this easier to see:
+
+```{r}
+#| label: gsea-mf
+
+gsea_MF <- clusterProfiler::gseGO(
+    geneList      = ranked_list,
+    ont           = "MF",
+    keyType       = "SYMBOL",
+    minGSSize     = 10,
+    maxGSSize     = 500,
+    pvalueCutoff  = 0.05,
+    verbose       = TRUE,
+    OrgDb         = org.Mm.eg.db,
+    pAdjustMethod = "BH"
+)
+
+dotplot(gsea_MF)
+```
+
+## 💡 Exercise 6: Simplify redundant terms
+
+Do you see redundant GO terms in the dotplot above?
+
+Use `clusterProfiler::simplify()` to reduce redundancy. Try adjusting the `cutoff` parameter (default 0.7 — lower values are more aggressive). Compare the dotplots before and after.
+
+
+```{r exercise 6}
+#| label: ex6-student
+
+# Your code here
+```
+
+```{r exercise 6 answer}
+#| label: ex6-answer
+#| code-fold: true
+#| code-summary: "Show answer"
+
+gsea_MF_simplified <- clusterProfiler::simplify(gsea_MF, cutoff = 0.7)
+
+dotplot(gsea_MF_simplified) +
+    ggtitle("After simplify() — cutoff 0.7")
+
+# How many terms remain?
+n_before <- sum(gsea_MF@result$p.adjust < 0.05)
+n_after  <- sum(gsea_MF_simplified@result$p.adjust < 0.05)
+cat(sprintf("Terms before: %d  |  after: %d\n", n_before, n_after))
+
+# Try a more aggressive cutoff
+gsea_MF_strict <- clusterProfiler::simplify(gsea_MF, cutoff = 0.4)
+dotplot(gsea_MF_strict) +
+    ggtitle("After simplify() — cutoff 0.4 (more aggressive)")
+```
+
+---
+
+## 6. KEGG pathway enrichment
+
+KEGG requires Entrez IDs rather than gene symbols.
+
+```{r}
+#| label: gsea-kegg
+
+gene_entrez <- clusterProfiler::bitr(
+    results_approach1$Gene,
+    fromType = "SYMBOL",
+    toType   = "ENTREZID",
+    OrgDb    = org.Mm.eg.db
+)
+
+ranked_kegg <- results_approach1 |>
+    left_join(gene_entrez, by = c("Gene" = "SYMBOL")) |>
+    filter(!is.na(ENTREZID)) |>
+    arrange(desc(logFC)) |>
+    (\(df) setNames(df$logFC, df$ENTREZID))()
+
+gsea_kegg <- clusterProfiler::gseKEGG(
+    geneList      = ranked_kegg,
+    organism      = "mmu",
+    minGSSize     = 10,
+    maxGSSize     = 500,
+    pvalueCutoff  = 0.05,
+    pAdjustMethod = "BH",
+    verbose       = TRUE
+)
+
+dotplot(gsea_kegg, showCategory = 10, split = ".sign", font.size = 8) +
+    facet_grid(. ~ .sign) +
+    ggtitle("GSEA-KEGG") +
+    theme(plot.title = element_text(size = 10, face = "bold", hjust = 0.5))
+```
+
+---
+
+## 7. Over-Representation Analysis (ORA)
+
+ORA tests whether a predefined gene set is over-represented among your significant proteins compared to a background
+
+```{r}
+#| label: ora
+
+sig        <- results_approach1 |> filter(adj.P.Val < 0.05) |> pull(Gene)
+background <- results_approach1 |> pull(Gene)
+
+ora <- clusterProfiler::enrichGO(
+    gene          = sig,
+    universe      = background,
+    OrgDb         = org.Mm.eg.db,
+    keyType       = "SYMBOL",
+    ont           = "ALL",
+    minGSSize     = 10,
+    maxGSSize     = 500,
+    pAdjustMethod = "BH",
+    pvalueCutoff  = 0.05,
+    qvalueCutoff  = 0.05
+)
+```
+
+
+## 💡 Exercise 7: Visualise ORA and compare to GSEA
+
+1. Create a dotplot of the ORA results
+2. Run ORA separately for upregulated and downregulated proteins
+3. Discuss with your neighbour:
+   - What is the key conceptual difference between ORA and GSEA?
+   - Do the two methods agree on the enriched pathways?
+   - What are the pros and cons of each?
+
+
+```{r exercise 7}
+#| label: ex7-student
+
+# Your code here
+
+# Hint: filter results_approach1 for adj.P.Val < 0.05 and logFC > 0 (up) or < 0 (down),
+# then run enrichGO separately for each direction
+
+```
+
+
+```{r exercise 7 answer}
+#| label: ex7-answer
+#| code-fold: true
+#| code-summary: "Show answer"
+
+# Dotplot of combined ORA
+dotplot(ora, showCategory = 10) +
+    ggtitle("ORA GO — all significant proteins")
+
+# Upregulated proteins only
+up_genes <- results_approach1 |>
+    filter(adj.P.Val < 0.05, logFC > 0) |>
+    pull(Gene)
+
+ora_up <- clusterProfiler::enrichGO(
+    gene          = up_genes,
+    universe      = background,
+    OrgDb         = org.Mm.eg.db,
+    keyType       = "SYMBOL",
+    ont           = "ALL",
+    pAdjustMethod = "BH",
+    pvalueCutoff  = 0.05,
+    qvalueCutoff  = 0.05
+)
+dotplot(ora_up, showCategory = 10) + ggtitle("ORA — Upregulated in ob")
+
+# Downregulated proteins only
+down_genes <- results_approach1 |>
+    filter(adj.P.Val < 0.05, logFC < 0) |>
+    pull(Gene)
+
+ora_down <- clusterProfiler::enrichGO(
+    gene          = down_genes,
+    universe      = background,
+    OrgDb         = org.Mm.eg.db,
+    keyType       = "SYMBOL",
+    ont           = "ALL",
+    pAdjustMethod = "BH",
+    pvalueCutoff  = 0.05,
+    qvalueCutoff  = 0.05
+)
+dotplot(ora_down, showCategory = 10) + ggtitle("ORA — Downregulated in ob")
+```
+
+
+## 8. KEGG ORA
+
+```{r}
+#| label: ora-kegg
+
+sig_entrez        <- gene_entrez |> filter(SYMBOL %in% sig) |> pull(ENTREZID)
+background_entrez <- gene_entrez$ENTREZID
+
+ora_kegg <- clusterProfiler::enrichKEGG(
+    gene          = sig_entrez,
+    universe      = background_entrez,
+    organism      = "mmu",
+    minGSSize     = 10,
+    maxGSSize     = 500,
+    pAdjustMethod = "BH",
+    pvalueCutoff  = 0.05,
+    qvalueCutoff  = 0.05
+)
+
+dotplot(ora_kegg, showCategory = 10, font.size = 8) +
+    ggtitle("ORA-KEGG") +
+    theme(plot.title = element_text(size = 10, face = "bold", hjust = 0.5))
+```
+
+
+
+
+
+## EXTRA EXERCISES 
+if you have the time, go through the limma user manual and look into how to write the code for more complex designs for limma analysis.
+
+
+## 💡 Exercise 8: Discussion — 3-group design
+
+Imagine you had three groups: lean, ob, and diabetic. How would you perform the limma DEA? discuss with your neighbour.
+
+
+## 💡 Exercise 9: Discussion — paired design
+
+imagine you had two groups (treated and control) and one measurement of each subject pre- and post- intervetion - hence a paired design. How can you now run limma in a paired design?
+
+
+
