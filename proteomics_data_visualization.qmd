@@ -54,29 +54,23 @@ library(tidyverse)
 
 By the end of this session you will be able to:
 
-1.  Describe the structure of a single-fiber proteomics dataset, access its intensity matrix and sample metadata, and distinguish biological from technical covariates.
-2.  Run PCA and UMAP on protein-intensity data, interpret scree plots and embedding layouts, and explain how PC scores feed into the UMAP neighbourhood graph.
-3.  Use PC loadings to run a ranked GSEA and identify biological processes driving each principal component; relate PC scores to experimental covariates using linear models.
-4.  Assign fiber-type labels to single fibers using canonical marker proteins and Seurat's graph-based clustering, then apply MILO neighbourhood testing to localise pre/post differences in fiber-state space across three complementary contrasts.
-5.  Interpret differential abundance results using boxplots, interactive volcano plots, UMAP feature overlays, and intensity–PC1 scatter plots with GAM smoothers, distinguishing main time effects from fiber-type-specific interactions.
-6.  Build heatmaps of model-derived log fold changes, cluster proteins into co-regulated modules using navmix, and run GO Biological Process over-representation analysis to link each module to a biological function.
+1.  Describe the structure of a **large-scale proteomics dataset**, access its intensity matrix and sample metadata, and distinguish biological from technical covariates.
+2.  **Run PCA and UMAP on protein-intensity data**, interpret scree plots and embedding layouts, and explain how PC scores feed into the UMAP neighbourhood graph.
+3.  **Use PC loadings to run a ranked GSEA and identify biological processes driving each principal component**; relate PC scores to experimental covariates using linear models.
+4.  Assign biological labels to samples using canonical marker proteins and Seurat's graph-based clustering, then **apply MILO neighbourhood testing to localise case/control differences in the high-dimensional space** across three complementary contrasts.
+5.  **Interpret differential abundance results using boxplots, interactive volcano plots, UMAP feature overlays, and intensity–PC1 scatter plots** with GAM smoothers, distinguishing main effects from covariate-type-specific interactions.
+6.  **Build heatmaps of model-derived log fold changes**, **cluster proteins into co-regulated modules** using navmix, and **run GO Biological Process over-representation analysis to link each module to a biological function**.
 
 ------------------------------------------------------------------------
 
-# Dataset: Single-Fiber Human Muscle Proteomics
+# Dataset: Human Single Muscle Fiber Proteomics
 
-::: callout-note
-This section is a placeholder — update with the actual cohort description, acquisition method, and any preprocessing already applied before the session.
-:::
-
-The example dataset contains protein intensities for **thousands of single muscle fibers** dissected from human donors. The data is distributed as an `.rds` file containing a **named list** with (at least) two objects:
+The example dataset contains protein intensities for **thousands of single muscle fibers** dissected from human donors before and after an 8-week exercise training intervention. The data is distributed as an `.rds` file containing a **named list** with two objects:
 
 | Object | Type | Rows | Columns | Notes |
 |---------------|---------------|---------------|---------------|---------------|
 | `intensities` | `matrix` / `data.frame` | proteins | single fibers | log2-transformed, normalized intensities |
-| `metadata` | `data.frame` | single fibers | sample-level annotations | donor ID, fiber type, condition, etc. |
-
-> **TODO**: replace with the exact object names, dimensions, normalization scheme, and donor / condition design once finalized.
+| `metadata` | `data.frame` | single fibers | sample-level annotations | fiber ID, donor ID, exercise time (pre or post), and fiber number. |
 
 ```{r load-data}
 #| eval: true
@@ -101,7 +95,7 @@ head(metadata)
 
 <summary><strong>Exercise 1.1 — possible answer</strong></summary>
 
-TODO — fill in once the metadata fields are finalized. The point to make: biological covariates are what we *want* the embedding to reflect; technical covariates are confounders we want to rule out as drivers of the structure we see.
+In this example, we do not have any plate ID or batch ID, and fiber_id and fiber_num are sample identifiers. This leaves subject_id and time as biological variables that can be used for downstream analysis. Subject carries information at the individual level, while time carries the information about when during the training intervention were the fibers dissected.
 
 </details>
 
