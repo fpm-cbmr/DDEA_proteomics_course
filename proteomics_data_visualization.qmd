@@ -68,7 +68,7 @@ By the end of this session you will be able to:
 The example dataset contains protein intensities for **thousands of single muscle fibers** dissected from human donors before and after an 8-week exercise training intervention. The data is distributed as an `.rds` file containing a **named list** with two objects:
 
 | Object | Type | Rows | Columns | Notes |
-|---------------|---------------|---------------|---------------|---------------|
+|----|----|----|----|----|
 | `intensities` | `matrix` / `data.frame` | proteins | single fibers | log2-transformed, normalized intensities |
 | `metadata` | `data.frame` | single fibers | sample-level annotations | fiber ID, donor ID, exercise time (pre or post), and fiber number. |
 
@@ -150,7 +150,7 @@ flowchart TD
 A single-fiber proteomics matrix has thousands of proteins measured across thousands of fibers — too many dimensions to visualize directly, and most pairs of proteins are correlated. Dimensionality reduction projects the data into a small number of axes that capture the strongest sources of variation, letting us see global structure (fiber types, donors, conditions) in two or three dimensions.
 
 | Method | Type | What it preserves | Use it for |
-|------------------|------------------|--------------------|------------------|
+|----|----|----|----|
 | PCA | Linear | Global variance; directions of maximum spread | Detecting dominant gradients / batches |
 | UMAP | Non-linear | Local neighborhood structure | Revealing discrete populations / clusters |
 
@@ -709,7 +709,7 @@ MILO counts *samples*, not individual fibers, so we need to define what constitu
 With fiber-type labels available we run three complementary tests:
 
 | Model object | Design formula | Contrast | Question |
-|------------------|------------------|------------------|------------------|
+|----|----|----|----|
 | `da_time` | `~ subject_id + fiber_type + time` | implicit: `post − pre` | Overall time effect, averaged across both fiber types |
 | `da_fast` | `~ 0 + group + subject_id` | `groupfast_post − groupfast_pre` | `post − pre` within fast fibers only |
 | `da_slow` | `~ 0 + group + subject_id` | `groupslow_post − groupslow_pre` | `post − pre` within slow fibers only |
@@ -899,7 +899,7 @@ The statistical results come from a **Generalized Additive Model (GAM)** fitted 
 *Understanding these models in detail is beyond the scope of this session. Focus on what each output column means:*
 
 | Column | Question it answers |
-|--------------------|----------------------------------------------------|
+|----|----|
 | `Estimate_time1` | Effect size (log2FC) of `post` vs. `pre`, averaged over PC1 |
 | `Pr(>|t|)_time1` | Is the protein differentially abundant between `pre` and `post`? |
 | `p_val_fiber_type` | Is the protein's intensity associated with PC1 (i.e. fiber type)? (no exercise effect) |
